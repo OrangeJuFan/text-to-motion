@@ -357,11 +357,11 @@ def grpo_args():
                             help='Path to reference model (if different from model_path)')
     grpo_group.add_argument('--group_size', type=int, default=4,
                             help='Group size G for GRPO (samples per prompt)')
-    grpo_group.add_argument('--learning_rate', type=float, default=1e-5,
+    grpo_group.add_argument('--learning_rate', type=float, default=1e-6,
                             help='Learning rate for GRPO training')
     grpo_group.add_argument('--clip_epsilon', type=float, default=0.2,
                             help='PPO clipping parameter')
-    grpo_group.add_argument('--kl_penalty', type=float, default=0.1,
+    grpo_group.add_argument('--kl_penalty', type=float, default=1,
                             help='KL divergence penalty weight')
     grpo_group.add_argument('--reward_type', type=str, default='matching',
                             choices=['matching', 'r_precision', 'combined'],

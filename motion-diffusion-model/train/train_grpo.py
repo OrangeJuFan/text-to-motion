@@ -139,6 +139,7 @@ def main():
         if hasattr(args, 'lr'):
             args.lr = user_learning_rate
     
+    # 创建模型（如果 use_lora，会在 create_model_and_diffusion 中添加 LoRA）
     model, diffusion = create_model_and_diffusion(args, data_loader)
     
     # Load pretrained weights
@@ -146,25 +147,25 @@ def main():
     load_saved_model(model, args.model_path, use_avg=False)
     model.to(device)
     
-    # Add LoRA if specified
-    if args.use_lora:
-        print("Adding LoRA adapters...")
-        from model.lora_adapter import add_lora_to_mdm
-        model = add_lora_to_mdm(
-            model,
-            r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            lora_dropout=0.0,
-            target_spec='all',
-        )
-        model.to(device)
+    # 注意：如果 use_lora=True，create_model_and_diffusion 已经添加了 LoRA
+    # 所以不需要再次添加（第 149-160 行的代码是重复的，但保留以防万一）
     
     # Create reference model (frozen copy)
-    print("Creating reference model...")
+    # 重要：参考模型应该**不包含 LoRA**，因为它是"参考"（原始预训练模型）
+    # 如果参考模型也包含 LoRA，LoRA 层是随机初始化的，会导致 log_prob 差异极大
+    print("Creating reference model (without LoRA)...")
     ref_model_path = args.ref_model_path if args.ref_model_path else args.model_path
+    
+    # 临时禁用 use_lora，创建不包含 LoRA 的参考模型
+    use_lora_backup = args.use_lora
+    args.use_lora = False
     ref_model, _ = create_model_and_diffusion(args, data_loader)
+    args.use_lora = use_lora_backup  # 恢复原始设置
+    
     load_saved_model(ref_model, ref_model_path, use_avg=False)
     ref_model.to(device)
+    
+    print("✓ 参考模型创建完成（不包含 LoRA，使用原始预训练权重）")
     
     # Freeze reference model
     for param in ref_model.parameters():

@@ -178,12 +178,28 @@ class GRPOTrainer:
             
             # 对所有空间维度求和，得到每个样本的 log prob
             # 根据 DanceGRPO，我们对所有维度求和
+            # 注意：对于高维数据（如 263*1*196），log prob 的绝对值会很大，这是正常的
             log_prob_per_timestep = log_prob_per_element.sum(dim=[1, 2, 3])  # [B]
+            
+            # 检查异常值（log prob 绝对值过大）
+            # 对于高维数据，每个时间步的 log prob 可能在 [-1e5, 1e5] 范围内
+            # 累积 50 个时间步后，总 log prob 可能在 [-5e6, 5e6] 范围内
+            # 这是正常的，关键是要确保 log_ratio 在合理范围内
+            if (log_prob_per_timestep.abs() > 2e5).any():
+                print(f"警告: log_prob_per_timestep 绝对值过大 at timestep {i}")
+                print(f"  log_prob_per_timestep range: [{log_prob_per_timestep.min().item():.2f}, {log_prob_per_timestep.max().item():.2f}]")
+                print(f"  log_prob_per_element shape: {log_prob_per_element.shape}")
+                num_elements = log_prob_per_element.shape[1] * log_prob_per_element.shape[2] * log_prob_per_element.shape[3]
+                print(f"  num_elements per timestep: {num_elements}")
+                print(f"  log_prob_per_element mean: {log_prob_per_element.mean().item():.6f}")
+                print(f"  log_prob_per_element std: {log_prob_per_element.std().item():.6f}")
+                # 限制 log prob 的范围（但允许较大的值，因为高维数据是正常的）
+                log_prob_per_timestep = torch.clamp(log_prob_per_timestep, min=-2e5, max=2e5)
             
             # 检查 NaN
             if torch.isnan(log_prob_per_timestep).any():
                 print(f"警告: log_prob_per_timestep 包含 NaN at timestep {i}")
-                log_prob_per_timestep = torch.nan_to_num(log_prob_per_timestep, nan=0.0, posinf=0.0, neginf=-1e6)
+                log_prob_per_timestep = torch.nan_to_num(log_prob_per_timestep, nan=0.0, posinf=2e5, neginf=-2e5)
             
             # 累积到总 log probability
             total_log_prob = total_log_prob + log_prob_per_timestep
@@ -192,6 +208,17 @@ class GRPOTrainer:
         if torch.isnan(total_log_prob).any():
             print("警告: total_log_prob 包含 NaN")
             total_log_prob = torch.nan_to_num(total_log_prob, nan=0.0, posinf=0.0, neginf=-1e6)
+        
+        # 检查最终 log prob 是否异常
+        # 对于高维数据，累积 log prob 的绝对值可能很大（几百万），这是正常的
+        # 关键是要确保 log_prob_current 和 log_prob_ref 的差值在合理范围内
+        if (total_log_prob.abs() > 1e7).any():
+            print("警告: total_log_prob 绝对值过大")
+            print(f"  total_log_prob range: [{total_log_prob.min().item():.2f}, {total_log_prob.max().item():.2f}]")
+            print(f"  total_log_prob mean: {total_log_prob.mean().item():.2f}")
+            print(f"  轨迹长度: {len(latents_sequence) - 1} 个时间步")
+            # 限制范围（但允许较大的值）
+            total_log_prob = torch.clamp(total_log_prob, min=-1e7, max=1e7)
         
         return total_log_prob
     
@@ -363,9 +390,28 @@ class GRPOTrainer:
         """
         # 计算 ratio（数值稳定性：限制差值范围）
         log_ratio = log_prob_current - log_prob_ref  # [B*G]
+        
+        # 检查 log_ratio 是否异常大
+        # 对于高维数据，log_prob 的绝对值可能很大，但它们的差值应该相对较小
+        # 如果差值很大（> 10），说明当前模型和参考模型的预测差异很大
+        if (log_ratio.abs() > 10).any():
+            print("警告: log_ratio 超出安全范围，将被裁剪")
+            print(f"  log_ratio range (before clamp): [{log_ratio.min().item():.2f}, {log_ratio.max().item():.2f}]")
+            print(f"  log_ratio mean: {log_ratio.mean().item():.2f}, std: {log_ratio.std().item():.2f}")
+            print(f"  log_prob_current range: [{log_prob_current.min().item():.2f}, {log_prob_current.max().item():.2f}]")
+            print(f"  log_prob_current mean: {log_prob_current.mean().item():.2f}")
+            print(f"  log_prob_ref range: [{log_prob_ref.min().item():.2f}, {log_prob_ref.max().item():.2f}]")
+            print(f"  log_prob_ref mean: {log_prob_ref.mean().item():.2f}")
+            print(f"  建议: 检查模型是否正常，可能需要降低学习率或增加 KL 惩罚")
+        
         # 限制 log_ratio 范围，避免 exp 溢出
-        log_ratio = torch.clamp(log_ratio, min=-20, max=20)
+        # 使用更严格的范围：-10 到 10，对应 ratio 范围 [4e-5, 2e4]
+        # 这比 -20 到 20 更保守，但更稳定
+        log_ratio = torch.clamp(log_ratio, min=-10, max=10)
         ratio = torch.exp(log_ratio)  # [B*G]
+        
+        # 额外限制 ratio 的范围（双重保护）
+        ratio = torch.clamp(ratio, min=1e-4, max=1e4)
         
         # 检查 NaN
         if torch.isnan(ratio).any():
@@ -500,11 +546,21 @@ class GRPOTrainer:
             model_kwargs,
         )  # [B*G]
         
-        # 检查 log_prob_current 是否包含 NaN
+        # 检查 log_prob_current 是否异常
         if torch.isnan(log_prob_current).any():
             print("警告: log_prob_current 包含 NaN")
             print(f"  log_prob_current range: [{log_prob_current.min().item():.4f}, {log_prob_current.max().item():.4f}]")
-            log_prob_current = torch.nan_to_num(log_prob_current, nan=0.0, posinf=0.0, neginf=-1e6)
+            log_prob_current = torch.nan_to_num(log_prob_current, nan=0.0, posinf=1e6, neginf=-1e6)
+        
+        # 检查 log_prob_current 绝对值是否过大
+        # 对于高维数据，log prob 绝对值大是正常的，但需要限制范围以确保数值稳定
+        if (log_prob_current.abs() > 1e6).any():
+            print("警告: log_prob_current 绝对值过大")
+            print(f"  log_prob_current range: [{log_prob_current.min().item():.2f}, {log_prob_current.max().item():.2f}]")
+            print(f"  log_prob_current mean: {log_prob_current.mean().item():.2f}")
+            print(f"  注意: 对于高维数据，log prob 绝对值大是正常的，将被限制在 [-1e6, 1e6]")
+            # 限制范围（与 log_prob_ref 保持一致）
+            log_prob_current = torch.clamp(log_prob_current, min=-1e6, max=1e6)
         
         # 清理不需要的中间变量以释放内存
         del current_result
@@ -521,11 +577,20 @@ class GRPOTrainer:
                 model_kwargs,
             )  # [B*G]
             
-            # 检查 log_prob_ref 是否包含 NaN
+            # 检查 log_prob_ref 是否异常
             if torch.isnan(log_prob_ref).any():
                 print("警告: log_prob_ref 包含 NaN")
                 print(f"  log_prob_ref range: [{log_prob_ref.min().item():.4f}, {log_prob_ref.max().item():.4f}]")
                 log_prob_ref = torch.nan_to_num(log_prob_ref, nan=0.0, posinf=0.0, neginf=-1e6)
+            
+            # 检查 log_prob_ref 绝对值是否过大
+            # 对于高维数据，log prob 绝对值大是正常的
+            if (log_prob_ref.abs() > 1e6).any():
+                print("警告: log_prob_ref 绝对值过大")
+                print(f"  log_prob_ref range: [{log_prob_ref.min().item():.2f}, {log_prob_ref.max().item():.2f}]")
+                print(f"  log_prob_ref mean: {log_prob_ref.mean().item():.2f}")
+                print(f"  注意: 对于高维数据，log prob 绝对值大是正常的")
+                log_prob_ref = torch.clamp(log_prob_ref, min=-1e6, max=1e6)
         
         # 清理轨迹以释放内存（如果不再需要）
         # 注意：轨迹只在计算 log prob 时需要，之后可以删除

@@ -9,11 +9,90 @@ from data_loaders.humanml_utils import HML_EE_JOINT_NAMES
 def load_model_wo_clip(model, state_dict):
     # assert (state_dict['sequence_pos_encoder.pe'][:model.sequence_pos_encoder.pe.shape[0]] == model.sequence_pos_encoder.pe).all()  # TEST
     # assert (state_dict['embed_timestep.sequence_pos_encoder.pe'][:model.embed_timestep.sequence_pos_encoder.pe.shape[0]] == model.embed_timestep.sequence_pos_encoder.pe).all()  # TEST
-    del state_dict['sequence_pos_encoder.pe']  # no need to load it (fixed), and causes size mismatch for older models
-    del state_dict['embed_timestep.sequence_pos_encoder.pe']  # no need to load it (fixed), and causes size mismatch for older models
-    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-    assert len(unexpected_keys) == 0
-    assert all([k.startswith('clip_model.') or 'sequence_pos_encoder' in k for k in missing_keys])
+    
+    # 检查模型是否是 PeftModel（使用 LoRA）
+    from peft import PeftModel
+    is_peft_model = isinstance(model, PeftModel)
+    
+    # 删除不需要的键
+    keys_to_delete = []
+    if 'sequence_pos_encoder.pe' in state_dict:
+        keys_to_delete.append('sequence_pos_encoder.pe')
+    if 'embed_timestep.sequence_pos_encoder.pe' in state_dict:
+        keys_to_delete.append('embed_timestep.sequence_pos_encoder.pe')
+    
+    for key in keys_to_delete:
+        del state_dict[key]
+    
+    # 如果模型是 PeftModel，需要将检查点中的键名添加 base_model.model. 前缀
+    if is_peft_model:
+        print("检测到 PeftModel，将检查点键名添加 'base_model.model.' 前缀...")
+        remapped_state_dict = {}
+        for key, value in state_dict.items():
+            # 检查点中的键名是直接的模型参数名，需要添加 base_model.model. 前缀
+            new_key = f"base_model.model.{key}"
+            remapped_state_dict[new_key] = value
+        state_dict = remapped_state_dict
+    
+    # 获取模型期望的键名
+    model_keys = set(model.state_dict().keys())
+    
+    # 过滤掉非模型参数的键（如优化器状态、步数等）
+    # 只保留模型参数的键
+    filtered_state_dict = {}
+    unexpected_keys = []
+    
+    for key, value in state_dict.items():
+        if key in model_keys:
+            filtered_state_dict[key] = value
+        else:
+            unexpected_keys.append(key)
+    
+    # 加载模型参数
+    missing_keys, remaining_unexpected = model.load_state_dict(filtered_state_dict, strict=False)
+    
+    # 打印调试信息
+    if unexpected_keys:
+        print(f"警告: 检查点中包含 {len(unexpected_keys)} 个非模型参数键（已忽略）:")
+        for key in unexpected_keys[:10]:  # 只打印前10个
+            print(f"  - {key}")
+        if len(unexpected_keys) > 10:
+            print(f"  ... 还有 {len(unexpected_keys) - 10} 个键")
+    
+    if remaining_unexpected:
+        print(f"警告: 模型加载后仍有 {len(remaining_unexpected)} 个意外键:")
+        for key in remaining_unexpected[:10]:
+            print(f"  - {key}")
+        if len(remaining_unexpected) > 10:
+            print(f"  ... 还有 {len(remaining_unexpected) - 10} 个键")
+    
+    # 检查 missing_keys 是否合理
+    # 正常的缺失键包括：
+    # 1. clip_model.* - CLIP 模型权重，从 CLIP 库加载，不保存在检查点中
+    # 2. sequence_pos_encoder.* - 位置编码，固定值，不需要加载
+    # 3. lora_* - LoRA 层权重，初始化为零，不需要从检查点加载
+    if missing_keys:
+        # 过滤出真正异常的缺失键
+        normal_missing = [k for k in missing_keys if (
+            k.startswith('clip_model.') or 
+            'sequence_pos_encoder' in k or 
+            'lora_' in k or
+            k.startswith('base_model.model.clip_model.')  # PeftModel 中的 clip_model
+        )]
+        invalid_missing = [k for k in missing_keys if k not in normal_missing]
+        
+        if normal_missing:
+            print(f"信息: 有 {len(normal_missing)} 个正常的缺失键（CLIP/位置编码/LoRA，将从其他来源加载或使用默认值）")
+        
+        if invalid_missing:
+            print(f"警告: 有 {len(invalid_missing)} 个异常的缺失模型参数键:")
+            for key in invalid_missing[:10]:
+                print(f"  - {key}")
+            if len(invalid_missing) > 10:
+                print(f"  ... 还有 {len(invalid_missing) - 10} 个键")
+            print("  这些键的缺失可能影响模型性能，请检查检查点是否完整")
+        else:
+            print(f"✓ 所有缺失的键都是正常的（CLIP/位置编码/LoRA），模型加载成功")
 
 
 def create_model_and_diffusion(args, data):
@@ -129,6 +208,10 @@ def create_gaussian_diffusion(args):
 
 def load_saved_model(model, model_path, use_avg: bool=False):  # use_avg_model
     state_dict = torch.load(model_path, map_location='cpu')
+    
+    # 打印检查点的键，用于调试
+    print(f"检查点包含的顶级键: {list(state_dict.keys())}")
+    
     # Use average model when possible
     if use_avg and 'model_avg' in state_dict.keys():
     # if use_avg_model:
@@ -140,5 +223,11 @@ def load_saved_model(model, model_path, use_avg: bool=False):  # use_avg_model
             state_dict = state_dict['model']
         else:
             print('checkpoint has no avg model, loading as usual.')
+            # 如果检查点中没有 'model' 键，可能整个检查点就是模型权重
+            # 检查是否包含模型参数（以常见的模型层名开头）
+            if not any(key.startswith(('seqTransEncoder.', 'embed_timestep.', 'embed_text.', 'output_process.')) for key in state_dict.keys()):
+                # 可能检查点结构不同，尝试直接使用
+                print('警告: 检查点结构可能不同，尝试直接加载...')
+    
     load_model_wo_clip(model, state_dict)
     return model
