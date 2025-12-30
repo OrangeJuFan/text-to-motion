@@ -12,6 +12,13 @@ from .reward_model import (
     CombinedMDMReward,
     create_mdm_reward_function,
 )
+from .reward_model_tmr import (
+    TMRModelWrapper,
+    TMRRewardFunction,
+    TMRMatchingScoreReward,
+    TMRCosineSimilarityReward,
+    create_tmr_reward_function,
+)
 
 __all__ = [
     'GRPOTrainer',
@@ -21,5 +28,10 @@ __all__ = [
     'RPrecisionReward',
     'CombinedMDMReward',
     'create_mdm_reward_function',
+    'TMRModelWrapper',
+    'TMRRewardFunction',
+    'TMRMatchingScoreReward',
+    'TMRCosineSimilarityReward',
+    'create_tmr_reward_function',
 ]
 
