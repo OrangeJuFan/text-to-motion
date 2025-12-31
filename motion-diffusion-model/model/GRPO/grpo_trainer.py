@@ -666,6 +666,13 @@ class GRPOTrainer:
         stats['mean_reward'] = rewards.mean().item()
         stats['std_reward'] = rewards.std().item()
         
+        # 计算每个 prompt 的平均得分（用于绘制曲线）
+        # rewards 形状: [B*G]，需要 reshape 为 [B, G] 然后计算每个 prompt 的平均值
+        batch_size = rewards.shape[0] // self.group_size
+        rewards_reshaped = rewards.view(batch_size, self.group_size)  # [B, G]
+        prompt_avg_rewards = rewards_reshaped.mean(dim=1)  # [B] - 每个 prompt 的平均得分
+        stats['prompt_avg_reward'] = prompt_avg_rewards.mean().item()  # 所有 prompt 的平均
+        
         # 检查损失是否异常
         if torch.isnan(loss) or torch.isinf(loss):
             print("错误: 损失包含 NaN 或 Inf，跳过此步")

@@ -15,6 +15,9 @@ Usage:
 import os
 import json
 import torch
+import matplotlib
+matplotlib.use('Agg')  # 使用非交互式后端，适合服务器环境
+import matplotlib.pyplot as plt
 from typing import Callable
 from tqdm import tqdm
 
@@ -197,6 +200,11 @@ def main():
     print(f"Total steps: {args.num_steps}, Batch size: {args.batch_size}, Group size: {args.group_size}")
     step = 0
     
+    # 用于绘制曲线的数据收集
+    training_steps = []
+    loss_values = []
+    prompt_avg_reward_values = []
+    
     # 创建进度条
     pbar = tqdm(
         total=args.num_steps,
@@ -224,6 +232,21 @@ def main():
                 try:
                     stats = trainer.step(batch)
                     
+                    # 收集数据用于绘制曲线
+                    training_steps.append(step)
+                    if 'loss' in stats:
+                        loss_values.append(stats['loss'])
+                    else:
+                        loss_values.append(0.0)
+                    
+                    if 'prompt_avg_reward' in stats:
+                        prompt_avg_reward_values.append(stats['prompt_avg_reward'])
+                    elif 'mean_reward' in stats:
+                        # 如果没有 prompt_avg_reward，使用 mean_reward 作为近似
+                        prompt_avg_reward_values.append(stats['mean_reward'])
+                    else:
+                        prompt_avg_reward_values.append(0.0)
+                    
                     # 更新进度条显示
                     # 构建显示信息（只显示关键指标，避免过长）
                     postfix_dict = {}
@@ -231,7 +254,9 @@ def main():
                     # 主要指标（格式化显示）
                     if 'loss' in stats:
                         postfix_dict['Loss'] = f"{stats['loss']:.4f}"
-                    if 'mean_reward' in stats:
+                    if 'prompt_avg_reward' in stats:
+                        postfix_dict['AvgScore'] = f"{stats['prompt_avg_reward']:.3f}"
+                    elif 'mean_reward' in stats:
                         postfix_dict['Reward'] = f"{stats['mean_reward']:.3f}"
                     if 'mean_advantage' in stats:
                         postfix_dict['Adv'] = f"{stats['mean_advantage']:.3f}"
@@ -250,6 +275,9 @@ def main():
                         tqdm.write(f"\nStep {step}:")
                         for key, value in stats.items():
                             tqdm.write(f"  {key}: {value:.4f}")
+                        # 打印 motion 平均得分
+                        if 'prompt_avg_reward' in stats:
+                            tqdm.write(f"  Motion 平均得分 (每个 prompt 的 {args.group_size} 个 motion 平均): {stats['prompt_avg_reward']:.4f}")
                     
                     # 详细日志（按 log_interval，如果 log_interval > 10）
                     if args.log_interval > 10 and step % args.log_interval == 0:
@@ -270,6 +298,15 @@ def main():
                             'stats': stats,
                         }, checkpoint_path)
                         tqdm.write(f"✓ Saved checkpoint to {checkpoint_path}")
+                        
+                        # 绘制并保存训练曲线
+                        plot_training_curves(
+                            training_steps,
+                            loss_values,
+                            prompt_avg_reward_values,
+                            args.save_dir,
+                            step
+                        )
                     
                     step += 1
                     
@@ -299,6 +336,80 @@ def main():
     }, final_checkpoint_path)
     print(f"\n✓ Training complete! Total steps: {step}")
     print(f"✓ Final checkpoint saved to {final_checkpoint_path}")
+    
+    # 绘制并保存最终训练曲线
+    plot_training_curves(
+        training_steps,
+        loss_values,
+        prompt_avg_reward_values,
+        args.save_dir,
+        step
+    )
+    print(f"✓ Training curves saved to {args.save_dir}")
+
+
+def plot_training_curves(steps, losses, prompt_avg_rewards, save_dir, current_step):
+    """
+    绘制训练曲线图
+    
+    参数:
+        steps: 训练步数列表
+        losses: 损失值列表
+        prompt_avg_rewards: 每个 prompt 的平均得分列表
+        save_dir: 保存目录
+        current_step: 当前训练步数
+    """
+    if len(steps) == 0:
+        return
+    
+    # 创建图表
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+    
+    # 第一个图：Loss 损失曲线
+    ax1.plot(steps, losses, 'b-', linewidth=1.5, label='Loss')
+    ax1.set_xlabel('Training Steps', fontsize=12)
+    ax1.set_ylabel('Loss', fontsize=12)
+    ax1.set_title('Training Loss Curve', fontsize=14, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+    
+    # 第二个图：Motion 平均得分曲线
+    ax2.plot(steps, prompt_avg_rewards, 'g-', linewidth=1.5, label='Motion Average Score')
+    ax2.set_xlabel('Training Steps', fontsize=12)
+    ax2.set_ylabel('Motion Average Score (per prompt)', fontsize=12)
+    ax2.set_title('Motion Average Score Curve', fontsize=14, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    
+    # 调整布局
+    plt.tight_layout()
+    
+    # 保存图片
+    plot_path = os.path.join(save_dir, f'training_curves_step_{current_step:09d}.png')
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # 同时保存一个最新的版本（覆盖更新）
+    latest_plot_path = os.path.join(save_dir, 'training_curves_latest.png')
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+    
+    ax1.plot(steps, losses, 'b-', linewidth=1.5, label='Loss')
+    ax1.set_xlabel('Training Steps', fontsize=12)
+    ax1.set_ylabel('Loss', fontsize=12)
+    ax1.set_title('Training Loss Curve', fontsize=14, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+    
+    ax2.plot(steps, prompt_avg_rewards, 'g-', linewidth=1.5, label='Motion Average Score')
+    ax2.set_xlabel('Training Steps', fontsize=12)
+    ax2.set_ylabel('Motion Average Score (per prompt)', fontsize=12)
+    ax2.set_title('Motion Average Score Curve', fontsize=14, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    
+    plt.tight_layout()
+    plt.savefig(latest_plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
 
 
 if __name__ == '__main__':
