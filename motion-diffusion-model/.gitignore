@@ -148,5 +148,5 @@ dataset/
 *.zip
 
 model/LORA.md
-GRPO_README.md
 PROJECT_STRUCTURE_CN.md
+GRPO_TRAINING_METRICS.md
