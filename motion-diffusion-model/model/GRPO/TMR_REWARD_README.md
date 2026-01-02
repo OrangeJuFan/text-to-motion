@@ -25,8 +25,11 @@
 from model.GRPO import create_tmr_reward_function
 
 # 创建 TMR 奖励函数
+# 注意：TMR 需要三个独立的权重文件
 reward_fn = create_tmr_reward_function(
-    tmr_checkpoint_path='./path/to/tmr/checkpoint.pth',  # TMR 预训练权重路径
+    text_encoder_path='./path/to/tmr/text_encoder.pt',  # 文本编码器权重
+    motion_encoder_path='./path/to/tmr/motion_encoder.pt',  # 动作编码器权重
+    movement_encoder_path='./path/to/tmr/motion_decoder.pt',  # 动作解码器权重
     reward_type='cosine',  # 或 'matching'
     dataset_name='humanml',
     device='cuda',
@@ -49,7 +52,9 @@ trainer = create_grpo_trainer(
 
 ```python
 reward_fn = create_tmr_reward_function(
-    tmr_checkpoint_path='./path/to/tmr/checkpoint.pth',
+    text_encoder_path='./path/to/tmr/text_encoder.pt',
+    motion_encoder_path='./path/to/tmr/motion_encoder.pt',
+    movement_encoder_path='./path/to/tmr/motion_decoder.pt',
     reward_type='matching',
     similarity_type='cosine',  # 或 'euclidean'
     normalization='linear',  # 或 'exponential', 'sigmoid'
@@ -58,7 +63,6 @@ reward_fn = create_tmr_reward_function(
     dataset_name='humanml',
     device='cuda',
 )
-```
 
 ### 3. 在训练脚本中使用
 
@@ -69,7 +73,9 @@ from model.GRPO import create_tmr_reward_function
 
 # 创建 TMR 奖励函数
 reward_fn = create_tmr_reward_function(
-    tmr_checkpoint_path=args.tmr_checkpoint_path,  # 从命令行参数获取
+    text_encoder_path=args.tmr_text_encoder_path,  # 从命令行参数获取
+    motion_encoder_path=args.tmr_motion_encoder_path,
+    movement_encoder_path=args.tmr_movement_encoder_path,
     reward_type=args.reward_type,
     dataset_name=args.dataset,
     device=args.device,
@@ -92,7 +98,10 @@ python -m train.train_grpo \
     --model_path ./save/pretrained_model/model000200000.pt \
     --save_dir ./save/grpo_tmr \
     --dataset humanml \
-    --tmr_checkpoint_path ./path/to/tmr/checkpoint.pth \
+    --reward_model_type tmr \
+    --tmr_text_encoder_path ./path/to/tmr/text_encoder.pt \
+    --tmr_motion_encoder_path ./path/to/tmr/motion_encoder.pt \
+    --tmr_movement_encoder_path ./path/to/tmr/motion_decoder.pt \
     --reward_type cosine \
     --batch_size 2 \
     --group_size 4 \
@@ -125,32 +134,40 @@ python -m train.train_grpo \
 
 ## TMR 权重文件格式
 
-TMR 权重文件可以是以下格式之一：
+TMR 需要三个独立的权重文件：
 
-1. **标准格式**（字典，包含各个组件）:
+1. **text_encoder.pt**: 文本编码器权重
+2. **motion_encoder.pt**: 动作编码器权重
+3. **motion_decoder.pt**: 动作解码器/编码器权重（也称为 movement_encoder）
+
+每个权重文件可以是以下格式之一：
+
+1. **直接 state_dict 格式**:
 ```python
 {
-    'text_encoder': {...},
-    'motion_encoder': {...},
-    'movement_encoder': {...},
+    'layer1.weight': ...,
+    'layer1.bias': ...,
+    ...
 }
 ```
 
-2. **带状态键的格式**:
-```python
-{
-    'text_encoder_state_dict': {...},
-    'motion_encoder_state_dict': {...},
-    'movement_encoder_state_dict': {...},
-}
-```
-
-3. **完整模型格式**（包含前缀）:
+2. **带 'model' 键的格式**:
 ```python
 {
     'model': {
-        'text_encoder.layer1.weight': ...,
-        'motion_encoder.layer1.weight': ...,
+        'layer1.weight': ...,
+        'layer1.bias': ...,
+        ...
+    }
+}
+```
+
+3. **带 'state_dict' 键的格式**:
+```python
+{
+    'state_dict': {
+        'layer1.weight': ...,
+        'layer1.bias': ...,
         ...
     }
 }
@@ -175,13 +192,19 @@ TMR 权重文件可以是以下格式之一：
 
 **错误信息**:
 ```
-FileNotFoundError: TMR 权重文件不存在: ...
+FileNotFoundError: 文本编码器权重文件不存在: ...
+FileNotFoundError: 动作编码器权重文件不存在: ...
+FileNotFoundError: 动作解码器权重文件不存在: ...
 ```
 
 **解决方案**:
-1. 检查权重文件路径是否正确
-2. 确保文件格式正确（.pth 或 .tar）
-3. 如果权重文件格式不标准，可能需要手动调整加载逻辑
+1. 确保提供了三个独立的权重文件路径：
+   - `--tmr_text_encoder_path`: text_encoder.pt
+   - `--tmr_motion_encoder_path`: motion_encoder.pt
+   - `--tmr_movement_encoder_path`: motion_decoder.pt
+2. 检查每个权重文件路径是否正确
+3. 确保文件格式正确（.pt 或 .pth）
+4. 如果权重文件格式不标准，代码会自动尝试多种格式
 
 ### 问题 2: 模块导入错误
 
@@ -218,10 +241,14 @@ ImportError: TMR 相关模块未找到
 
 ## 注意事项
 
-1. **权重文件路径**: 确保 TMR 预训练权重文件路径正确
+1. **权重文件路径**: 必须提供三个独立的 TMR 预训练权重文件路径：
+   - 文本编码器 (text_encoder.pt)
+   - 动作编码器 (motion_encoder.pt)
+   - 动作解码器 (motion_decoder.pt)
 2. **数据集兼容性**: 当前支持 'humanml' 和 'kit' 数据集
 3. **设备一致性**: 确保 TMR 模型和训练模型在同一设备上
 4. **内存占用**: TMR 模型会占用额外的 GPU 内存，注意调整批次大小
+5. **文件命名**: 虽然第三个文件通常命名为 motion_decoder.pt，但代码中参数名为 movement_encoder_path，这是为了与代码中的变量名保持一致
 
 ## 参考
 

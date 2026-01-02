@@ -34,7 +34,9 @@ def create_reward_fn(
     reward_model_type: str = 'mdm',
     reward_type: str = 'matching',
     dataset_name: str = 'humanml',
-    tmr_checkpoint_path: Optional[str] = None,
+    tmr_text_encoder_path: Optional[str] = None,
+    tmr_motion_encoder_path: Optional[str] = None,
+    tmr_movement_encoder_path: Optional[str] = None,
     tmr_similarity_type: str = 'cosine',
     tmr_normalization: str = 'linear',
     tmr_max_distance: float = 10.0,
@@ -54,7 +56,9 @@ def create_reward_fn(
             - 对于 MDM: 'matching', 'r_precision', 'combined'
             - 对于 TMR: 'matching', 'cosine'
         dataset_name: 数据集名称 ('humanml' 或 'kit')
-        tmr_checkpoint_path: TMR 预训练权重路径（仅当 reward_model_type='tmr' 时需要）
+        tmr_text_encoder_path: TMR 文本编码器权重路径 (text_encoder.pt，仅当 reward_model_type='tmr' 时需要)
+        tmr_motion_encoder_path: TMR 动作编码器权重路径 (motion_encoder.pt，仅当 reward_model_type='tmr' 时需要)
+        tmr_movement_encoder_path: TMR 动作解码器权重路径 (motion_decoder.pt，仅当 reward_model_type='tmr' 时需要)
         tmr_similarity_type: TMR 相似度类型 ('cosine' 或 'euclidean')
         tmr_normalization: TMR 归一化方式 ('linear', 'exponential', 'sigmoid')
         tmr_max_distance: TMR 最大距离（用于线性归一化）
@@ -88,8 +92,12 @@ def create_reward_fn(
     
     elif reward_model_type == 'tmr':
         # 使用 TMR 预训练模型奖励函数
-        if tmr_checkpoint_path is None:
-            raise ValueError("使用 TMR 奖励模型时，必须提供 --tmr_checkpoint_path 参数")
+        if tmr_text_encoder_path is None:
+            raise ValueError("使用 TMR 奖励模型时，必须提供 --tmr_text_encoder_path 参数")
+        if tmr_motion_encoder_path is None:
+            raise ValueError("使用 TMR 奖励模型时，必须提供 --tmr_motion_encoder_path 参数")
+        if tmr_movement_encoder_path is None:
+            raise ValueError("使用 TMR 奖励模型时，必须提供 --tmr_movement_encoder_path 参数")
         
         try:
             from model.GRPO.reward_model_tmr import create_tmr_reward_function
@@ -105,14 +113,18 @@ def create_reward_fn(
             # 对于 cosine 类型，使用默认参数即可
             
             reward_fn = create_tmr_reward_function(
-                tmr_checkpoint_path=tmr_checkpoint_path,
+                text_encoder_path=tmr_text_encoder_path,
+                motion_encoder_path=tmr_motion_encoder_path,
+                movement_encoder_path=tmr_movement_encoder_path,
                 reward_type=reward_type,
                 dataset_name=dataset_name,
                 device=device,
                 **tmr_kwargs,
             )
             print(f"✓ 使用 TMR 预训练模型奖励函数")
-            print(f"  - 权重路径: {tmr_checkpoint_path}")
+            print(f"  - 文本编码器: {tmr_text_encoder_path}")
+            print(f"  - 动作编码器: {tmr_motion_encoder_path}")
+            print(f"  - 动作解码器: {tmr_movement_encoder_path}")
             print(f"  - 奖励类型: {reward_type}")
             if reward_type == 'matching':
                 print(f"  - 相似度类型: {tmr_similarity_type}")
@@ -238,7 +250,9 @@ def main():
         reward_model_type=args.reward_model_type,
         reward_type=args.reward_type,
         dataset_name=args.dataset,
-        tmr_checkpoint_path=getattr(args, 'tmr_checkpoint_path', None),
+        tmr_text_encoder_path=getattr(args, 'tmr_text_encoder_path', None),
+        tmr_motion_encoder_path=getattr(args, 'tmr_motion_encoder_path', None),
+        tmr_movement_encoder_path=getattr(args, 'tmr_movement_encoder_path', None),
         tmr_similarity_type=getattr(args, 'tmr_similarity_type', 'cosine'),
         tmr_normalization=getattr(args, 'tmr_normalization', 'linear'),
         tmr_max_distance=getattr(args, 'tmr_max_distance', 10.0),

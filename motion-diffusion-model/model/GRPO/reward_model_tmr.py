@@ -51,7 +51,9 @@ class TMRModelWrapper:
     
     def __init__(
         self,
-        checkpoint_path: str,
+        text_encoder_path: str,
+        motion_encoder_path: str,
+        movement_encoder_path: str,
         dataset_name: str = 'humanml',
         device: str = 'cuda',
     ):
@@ -59,7 +61,9 @@ class TMRModelWrapper:
         初始化 TMR 模型包装器
         
         参数:
-            checkpoint_path: TMR 预训练权重路径（.pth 或 .tar 文件）
+            text_encoder_path: 文本编码器权重路径 (text_encoder.pt)
+            motion_encoder_path: 动作编码器权重路径 (motion_encoder.pt)
+            movement_encoder_path: 动作解码器/编码器权重路径 (motion_decoder.pt 或 movement_encoder.pt)
             dataset_name: 数据集名称 ('humanml' 或 'kit')
             device: 设备
         """
@@ -100,7 +104,7 @@ class TMRModelWrapper:
         )
         
         # 加载预训练权重
-        self._load_checkpoint(checkpoint_path)
+        self._load_checkpoints(text_encoder_path, motion_encoder_path, movement_encoder_path)
         
         # 移动到设备并设置为评估模式
         self.text_encoder.to(device)
@@ -111,66 +115,88 @@ class TMRModelWrapper:
         self.motion_encoder.eval()
         self.movement_encoder.eval()
     
-    def _load_checkpoint(self, checkpoint_path: str):
+    def _load_checkpoints(
+        self,
+        text_encoder_path: str,
+        motion_encoder_path: str,
+        movement_encoder_path: str,
+    ):
         """
-        加载预训练权重
+        分别加载三个组件的预训练权重
         
         参数:
-            checkpoint_path: 权重文件路径
+            text_encoder_path: 文本编码器权重路径
+            motion_encoder_path: 动作编码器权重路径
+            movement_encoder_path: 动作解码器/编码器权重路径
         """
-        if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(f"TMR 权重文件不存在: {checkpoint_path}")
+        # 检查文件是否存在
+        if not os.path.exists(text_encoder_path):
+            raise FileNotFoundError(f"文本编码器权重文件不存在: {text_encoder_path}")
+        if not os.path.exists(motion_encoder_path):
+            raise FileNotFoundError(f"动作编码器权重文件不存在: {motion_encoder_path}")
+        if not os.path.exists(movement_encoder_path):
+            raise FileNotFoundError(f"动作解码器权重文件不存在: {movement_encoder_path}")
         
-        print(f"加载 TMR 预训练权重: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        
-        # 尝试不同的权重键名（兼容不同的保存格式）
-        if isinstance(checkpoint, dict):
-            # 如果 checkpoint 是字典，尝试加载各个组件
-            if 'text_encoder' in checkpoint:
-                self.text_encoder.load_state_dict(checkpoint['text_encoder'])
-            elif 'text_encoder_state_dict' in checkpoint:
-                self.text_encoder.load_state_dict(checkpoint['text_encoder_state_dict'])
-            
-            if 'motion_encoder' in checkpoint:
-                self.motion_encoder.load_state_dict(checkpoint['motion_encoder'])
-            elif 'motion_encoder_state_dict' in checkpoint:
-                self.motion_encoder.load_state_dict(checkpoint['motion_encoder_state_dict'])
-            
-            if 'movement_encoder' in checkpoint:
-                self.movement_encoder.load_state_dict(checkpoint['movement_encoder'])
-            elif 'movement_encoder_state_dict' in checkpoint:
-                self.movement_encoder.load_state_dict(checkpoint['movement_encoder_state_dict'])
-            
-            # 如果包含完整的模型状态
-            if 'model' in checkpoint:
-                model_state = checkpoint['model']
-                # 尝试提取各个组件的权重
-                text_state = {k.replace('text_encoder.', ''): v 
-                             for k, v in model_state.items() 
-                             if k.startswith('text_encoder.')}
-                motion_state = {k.replace('motion_encoder.', ''): v 
-                               for k, v in model_state.items() 
-                               if k.startswith('motion_encoder.')}
-                movement_state = {k.replace('movement_encoder.', ''): v 
-                                 for k, v in model_state.items() 
-                                 if k.startswith('movement_encoder.')}
-                
-                if text_state:
-                    self.text_encoder.load_state_dict(text_state, strict=False)
-                if motion_state:
-                    self.motion_encoder.load_state_dict(motion_state, strict=False)
-                if movement_state:
-                    self.movement_encoder.load_state_dict(movement_state, strict=False)
+        # 加载文本编码器
+        print(f"加载文本编码器权重: {text_encoder_path}")
+        text_checkpoint = torch.load(text_encoder_path, map_location=self.device)
+        if isinstance(text_checkpoint, dict):
+            # 尝试不同的键名
+            if 'model' in text_checkpoint:
+                self.text_encoder.load_state_dict(text_checkpoint['model'], strict=False)
+            elif 'state_dict' in text_checkpoint:
+                self.text_encoder.load_state_dict(text_checkpoint['state_dict'], strict=False)
+            elif 'text_encoder' in text_checkpoint:
+                self.text_encoder.load_state_dict(text_checkpoint['text_encoder'], strict=False)
+            else:
+                # 直接使用字典作为 state_dict
+                self.text_encoder.load_state_dict(text_checkpoint, strict=False)
         else:
-            # 如果 checkpoint 直接是模型状态
-            print("警告: checkpoint 格式可能不正确，尝试直接加载...")
-            try:
-                self.text_encoder.load_state_dict(checkpoint, strict=False)
-            except:
-                print("无法直接加载 checkpoint，请检查格式")
+            # 直接是 state_dict
+            self.text_encoder.load_state_dict(text_checkpoint, strict=False)
+        print("  文本编码器加载完成")
         
-        print("TMR 模型加载完成")
+        # 加载动作编码器
+        print(f"加载动作编码器权重: {motion_encoder_path}")
+        motion_checkpoint = torch.load(motion_encoder_path, map_location=self.device)
+        if isinstance(motion_checkpoint, dict):
+            # 尝试不同的键名
+            if 'model' in motion_checkpoint:
+                self.motion_encoder.load_state_dict(motion_checkpoint['model'], strict=False)
+            elif 'state_dict' in motion_checkpoint:
+                self.motion_encoder.load_state_dict(motion_checkpoint['state_dict'], strict=False)
+            elif 'motion_encoder' in motion_checkpoint:
+                self.motion_encoder.load_state_dict(motion_checkpoint['motion_encoder'], strict=False)
+            else:
+                # 直接使用字典作为 state_dict
+                self.motion_encoder.load_state_dict(motion_checkpoint, strict=False)
+        else:
+            # 直接是 state_dict
+            self.motion_encoder.load_state_dict(motion_checkpoint, strict=False)
+        print("  动作编码器加载完成")
+        
+        # 加载动作解码器/编码器 (movement encoder)
+        print(f"加载动作解码器权重: {movement_encoder_path}")
+        movement_checkpoint = torch.load(movement_encoder_path, map_location=self.device)
+        if isinstance(movement_checkpoint, dict):
+            # 尝试不同的键名
+            if 'model' in movement_checkpoint:
+                self.movement_encoder.load_state_dict(movement_checkpoint['model'], strict=False)
+            elif 'state_dict' in movement_checkpoint:
+                self.movement_encoder.load_state_dict(movement_checkpoint['state_dict'], strict=False)
+            elif 'movement_encoder' in movement_checkpoint:
+                self.movement_encoder.load_state_dict(movement_checkpoint['movement_encoder'], strict=False)
+            elif 'motion_decoder' in movement_checkpoint:
+                self.movement_encoder.load_state_dict(movement_checkpoint['motion_decoder'], strict=False)
+            else:
+                # 直接使用字典作为 state_dict
+                self.movement_encoder.load_state_dict(movement_checkpoint, strict=False)
+        else:
+            # 直接是 state_dict
+            self.movement_encoder.load_state_dict(movement_checkpoint, strict=False)
+        print("  动作解码器加载完成")
+        
+        print("TMR 模型所有组件加载完成")
     
     def encode_text(
         self,
@@ -257,7 +283,9 @@ class TMRRewardFunction:
     
     def __init__(
         self,
-        tmr_checkpoint_path: str,
+        text_encoder_path: str,
+        motion_encoder_path: str,
+        movement_encoder_path: str,
         dataset_name: str = 'humanml',
         device: str = 'cuda',
         word_vectorizer: Optional[WordVectorizer] = None,
@@ -266,7 +294,9 @@ class TMRRewardFunction:
         初始化 TMR 奖励函数
         
         参数:
-            tmr_checkpoint_path: TMR 预训练权重路径
+            text_encoder_path: 文本编码器权重路径 (text_encoder.pt)
+            motion_encoder_path: 动作编码器权重路径 (motion_encoder.pt)
+            movement_encoder_path: 动作解码器权重路径 (motion_decoder.pt)
             dataset_name: 数据集名称 ('humanml' 或 'kit')
             device: 设备
             word_vectorizer: 词向量化器（如果为 None，会尝试加载）
@@ -276,7 +306,9 @@ class TMRRewardFunction:
         
         # 初始化 TMR 模型
         self.tmr_model = TMRModelWrapper(
-            checkpoint_path=tmr_checkpoint_path,
+            text_encoder_path=text_encoder_path,
+            motion_encoder_path=motion_encoder_path,
+            movement_encoder_path=movement_encoder_path,
             dataset_name=dataset_name,
             device=device,
         )
@@ -434,7 +466,9 @@ class TMRMatchingScoreReward(TMRRewardFunction):
     
     def __init__(
         self,
-        tmr_checkpoint_path: str,
+        text_encoder_path: str,
+        motion_encoder_path: str,
+        movement_encoder_path: str,
         similarity_type: str = 'cosine',  # 'cosine' 或 'euclidean'
         max_distance: float = 10.0,  # 用于欧氏距离归一化
         scale: float = 2.0,  # 用于指数衰减
@@ -444,13 +478,15 @@ class TMRMatchingScoreReward(TMRRewardFunction):
     ):
         """
         参数:
-            tmr_checkpoint_path: TMR 预训练权重路径
+            text_encoder_path: 文本编码器权重路径 (text_encoder.pt)
+            motion_encoder_path: 动作编码器权重路径 (motion_encoder.pt)
+            movement_encoder_path: 动作解码器权重路径 (motion_decoder.pt)
             similarity_type: 相似度类型 ('cosine' 或 'euclidean')
             max_distance: 最大距离（用于线性归一化）
             scale: 缩放因子（用于指数衰减）
             normalization: 归一化方式 ('linear', 'exponential', 'sigmoid')
         """
-        super().__init__(tmr_checkpoint_path, *args, **kwargs)
+        super().__init__(text_encoder_path, motion_encoder_path, movement_encoder_path, *args, **kwargs)
         self.similarity_type = similarity_type
         self.max_distance = max_distance
         self.scale = scale
@@ -573,7 +609,9 @@ class TMRCosineSimilarityReward(TMRRewardFunction):
 
 
 def create_tmr_reward_function(
-    tmr_checkpoint_path: str,
+    text_encoder_path: str,
+    motion_encoder_path: str,
+    movement_encoder_path: str,
     reward_type: str = 'matching',
     dataset_name: str = 'humanml',
     device: str = 'cuda',
@@ -583,7 +621,9 @@ def create_tmr_reward_function(
     创建 TMR 奖励函数的工厂函数
     
     参数:
-        tmr_checkpoint_path: TMR 预训练权重路径
+        text_encoder_path: 文本编码器权重路径 (text_encoder.pt)
+        motion_encoder_path: 动作编码器权重路径 (motion_encoder.pt)
+        movement_encoder_path: 动作解码器权重路径 (motion_decoder.pt)
         reward_type: 奖励类型 ('matching', 'cosine')
         dataset_name: 数据集名称
         device: 设备
@@ -594,14 +634,18 @@ def create_tmr_reward_function(
     """
     if reward_type == 'matching':
         return TMRMatchingScoreReward(
-            tmr_checkpoint_path=tmr_checkpoint_path,
+            text_encoder_path=text_encoder_path,
+            motion_encoder_path=motion_encoder_path,
+            movement_encoder_path=movement_encoder_path,
             dataset_name=dataset_name,
             device=device,
             **kwargs,
         )
     elif reward_type == 'cosine':
         return TMRCosineSimilarityReward(
-            tmr_checkpoint_path=tmr_checkpoint_path,
+            text_encoder_path=text_encoder_path,
+            motion_encoder_path=motion_encoder_path,
+            movement_encoder_path=movement_encoder_path,
             dataset_name=dataset_name,
             device=device,
             **kwargs,
@@ -613,19 +657,25 @@ def create_tmr_reward_function(
 # 使用示例
 if __name__ == '__main__':
     # 示例：创建 TMR 奖励函数
-    # 注意：需要提供 TMR 预训练权重路径
-    tmr_checkpoint_path = './path/to/tmr/checkpoint.pth'  # 替换为实际路径
+    # 注意：需要提供三个 TMR 预训练权重文件路径
+    text_encoder_path = './path/to/tmr/text_encoder.pt'
+    motion_encoder_path = './path/to/tmr/motion_encoder.pt'
+    movement_encoder_path = './path/to/tmr/motion_decoder.pt'
     
     # 创建奖励函数（使用余弦相似度）
     reward_fn = create_tmr_reward_function(
-        tmr_checkpoint_path=tmr_checkpoint_path,
+        text_encoder_path=text_encoder_path,
+        motion_encoder_path=motion_encoder_path,
+        movement_encoder_path=movement_encoder_path,
         reward_type='cosine',
         device='cuda',
     )
     
     # 或者使用匹配分数（可配置）
     reward_fn = create_tmr_reward_function(
-        tmr_checkpoint_path=tmr_checkpoint_path,
+        text_encoder_path=text_encoder_path,
+        motion_encoder_path=motion_encoder_path,
+        movement_encoder_path=movement_encoder_path,
         reward_type='matching',
         similarity_type='cosine',  # 或 'euclidean'
         normalization='linear',  # 或 'exponential', 'sigmoid'

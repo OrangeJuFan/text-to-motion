@@ -369,8 +369,12 @@ def grpo_args():
     grpo_group.add_argument('--reward_type', type=str, default='matching',
                             choices=['matching', 'r_precision', 'combined', 'cosine'],
                             help='Reward function type: matching (Matching Score), r_precision (R-Precision), combined (both), or cosine (for TMR)')
-    grpo_group.add_argument('--tmr_checkpoint_path', type=str, default=None,
-                            help='Path to TMR pretrained checkpoint (required if reward_model_type=tmr)')
+    grpo_group.add_argument('--tmr_text_encoder_path', type=str, default=None,
+                            help='Path to TMR text encoder checkpoint (text_encoder.pt, required if reward_model_type=tmr)')
+    grpo_group.add_argument('--tmr_motion_encoder_path', type=str, default=None,
+                            help='Path to TMR motion encoder checkpoint (motion_encoder.pt, required if reward_model_type=tmr)')
+    grpo_group.add_argument('--tmr_movement_encoder_path', type=str, default=None,
+                            help='Path to TMR movement encoder/decoder checkpoint (motion_decoder.pt, required if reward_model_type=tmr)')
     grpo_group.add_argument('--tmr_similarity_type', type=str, default='cosine',
                             choices=['cosine', 'euclidean'],
                             help='Similarity type for TMR reward (cosine or euclidean)')
