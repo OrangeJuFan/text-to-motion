@@ -27,6 +27,7 @@ from utils.model_util import create_model_and_diffusion, load_saved_model
 from utils.parser_util import grpo_args
 from data_loaders.get_data import get_dataset_loader
 from model.GRPO.grpo_trainer import create_grpo_trainer
+from model.GRPO.grpo_trainer_flow import create_flow_grpo_trainer
 
 
 def create_reward_fn(
@@ -260,20 +261,48 @@ def main():
     )
     
     # Create GRPO trainer
-    print("Creating GRPO trainer...")
+    grpo_type = getattr(args, 'grpo_type', 'normal_grpo')
+    print(f"Creating {grpo_type} trainer...")
     # 优先使用 --learning_rate，如果没有提供则使用 --lr
     grpo_lr = getattr(args, 'learning_rate', None) or getattr(args, 'lr', 1e-5)
-    trainer = create_grpo_trainer(
-        model=model,
-        ref_model=ref_model,
-        diffusion=diffusion,
-        reward_fn=reward_fn,
-        learning_rate=grpo_lr,
-        group_size=args.group_size,
-        clip_epsilon=args.clip_epsilon,
-        kl_penalty=args.kl_penalty,
-        device=device,
-    )
+    
+    if grpo_type == 'flow_grpo':
+        # 使用 Flow-GRPO 训练器
+        noise_scale = getattr(args, 'noise_scale', 0.7)
+        train_timesteps = getattr(args, 'train_timesteps', 10)
+        inference_timesteps = getattr(args, 'inference_timesteps', 40)
+        
+        print(f"  - SDE noise scale: {noise_scale}")
+        print(f"  - Training timesteps: {train_timesteps}")
+        print(f"  - Inference timesteps: {inference_timesteps}")
+        
+        trainer = create_flow_grpo_trainer(
+            model=model,
+            ref_model=ref_model,
+            diffusion=diffusion,
+            reward_fn=reward_fn,
+            learning_rate=grpo_lr,
+            group_size=args.group_size,
+            clip_epsilon=args.clip_epsilon,
+            kl_penalty=args.kl_penalty,
+            noise_scale=noise_scale,
+            train_timesteps=train_timesteps,
+            inference_timesteps=inference_timesteps,
+            device=device,
+        )
+    else:
+        # 使用标准 GRPO 训练器
+        trainer = create_grpo_trainer(
+            model=model,
+            ref_model=ref_model,
+            diffusion=diffusion,
+            reward_fn=reward_fn,
+            learning_rate=grpo_lr,
+            group_size=args.group_size,
+            clip_epsilon=args.clip_epsilon,
+            kl_penalty=args.kl_penalty,
+            device=device,
+        )
     
     # Training loop
     print("Starting training...")

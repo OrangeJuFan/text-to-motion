@@ -363,6 +363,9 @@ def grpo_args():
                             help='PPO clipping parameter')
     grpo_group.add_argument('--kl_penalty', type=float, default=1,
                             help='KL divergence penalty weight')
+    grpo_group.add_argument('--grpo_type', type=str, default='normal_grpo',
+                            choices=['normal_grpo', 'flow_grpo'],
+                            help='GRPO trainer type: normal_grpo (standard GRPO) or flow_grpo (Flow-based GRPO with SDE)')
     grpo_group.add_argument('--reward_model_type', type=str, default='mdm',
                             choices=['mdm', 'tmr'],
                             help='Reward model type: mdm (MDM evaluator) or tmr (TMR pretrained model)')
@@ -385,6 +388,14 @@ def grpo_args():
                             help='Max distance for TMR euclidean distance normalization')
     grpo_group.add_argument('--tmr_scale', type=float, default=2.0,
                             help='Scale factor for TMR exponential/sigmoid normalization')
+    
+    # Flow-GRPO 特定参数（仅当 --grpo_type=flow_grpo 时使用）
+    grpo_group.add_argument('--noise_scale', type=float, default=0.7,
+                            help='SDE noise scale coefficient a for Flow-GRPO (default: 0.7)')
+    grpo_group.add_argument('--train_timesteps', type=int, default=10,
+                            help='Number of inference steps during training for Flow-GRPO (default: 10)')
+    grpo_group.add_argument('--inference_timesteps', type=int, default=40,
+                            help='Number of inference steps during inference for Flow-GRPO (default: 40)')
     
     # 解析参数并应用规则
     args = apply_rules(parser.parse_args())

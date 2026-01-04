@@ -5,6 +5,7 @@ GRPO (Group Relative Policy Optimization) 模块
 """
 
 from .grpo_trainer import GRPOTrainer, create_grpo_trainer
+from .grpo_trainer_flow import FlowGRPOTrainer, create_flow_grpo_trainer
 from .reward_model import (
     MDMRewardFunction,
     MatchingScoreReward,
@@ -23,6 +24,8 @@ from .reward_model_tmr import (
 __all__ = [
     'GRPOTrainer',
     'create_grpo_trainer',
+    'FlowGRPOTrainer',
+    'create_flow_grpo_trainer',
     'MDMRewardFunction',
     'MatchingScoreReward',
     'RPrecisionReward',
