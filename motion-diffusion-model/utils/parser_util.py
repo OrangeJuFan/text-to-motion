@@ -389,6 +389,26 @@ def grpo_args():
     grpo_group.add_argument('--tmr_scale', type=float, default=2.0,
                             help='Scale factor for TMR exponential/sigmoid normalization')
     
+    # 奖励函数高级参数（适用于 MDM 和 TMR 奖励模型）
+    grpo_group.add_argument('--use_dense_reward', action='store_true',
+                            help='Enable Segment-Dense reward mode. If False, use Global reward mode (default: False)')
+    grpo_group.add_argument('--use_physics_reward', action='store_true',
+                            help='Enable physics regularization reward (default: False)')
+    grpo_group.add_argument('--k_segments', type=int, default=1,
+                            help='Number of text segments for validation or default processing (default: 1)')
+    grpo_group.add_argument('--max_motion_length', type=int, default=196,
+                            help='Maximum motion length in frames. Motions exceeding this will be truncated (default: 196)')
+    grpo_group.add_argument('--alpha', type=float, default=0.5,
+                            help='Negative reward penalty weight for Segment-Dense mode (default: 0.5)')
+    grpo_group.add_argument('--beta_s', type=float, default=1.0,
+                            help='Semantic reward weight (default: 1.0)')
+    grpo_group.add_argument('--beta_p', type=float, default=0.1,
+                            help='Physics reward weight (default: 0.1)')
+    grpo_group.add_argument('--lambda_skate', type=float, default=1.0,
+                            help='Skating penalty weight for physics reward (default: 1.0)')
+    grpo_group.add_argument('--lambda_jerk', type=float, default=1.0,
+                            help='Jerk penalty weight for physics reward (default: 1.0)')
+    
     # Flow-GRPO 特定参数（仅当 --grpo_type=flow_grpo 时使用）
     grpo_group.add_argument('--noise_scale', type=float, default=0.7,
                             help='SDE noise scale coefficient a for Flow-GRPO (default: 0.7)')

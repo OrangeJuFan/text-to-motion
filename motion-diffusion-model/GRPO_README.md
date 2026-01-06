@@ -807,5 +807,14 @@ tensorboard --logdir ./save/grpo_finetuned
 - **LogProb**: `mean_log_prob_current`, `mean_log_prob_ref`, `mean_ratio`
 - **Training**: `grad_norm`, `learning_rate`
 
-- 评估命令
+
+**评估模型**
+- 50步模型
+```bash
 python -m eval.eval_humanml --model_path ./save/humanml_trans_enc_512/model000475000.pt
+```
+
+- lora_attnffn
+```bash
+python -m eval.eval_humanml --model_path ./save/test_lora_lorar128_loraalpha16_attnffn/model000600000.pt
+```

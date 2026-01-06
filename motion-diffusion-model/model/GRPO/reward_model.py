@@ -22,7 +22,7 @@ MDM 项目本身不使用 reward 函数，而是使用评估指标来衡量生�
 import torch
 import torch.nn.functional as F
 import numpy as np
-from typing import List, Optional
+from typing import List, Optional, Tuple, Dict, Union
 from data_loaders.humanml.networks.evaluator_wrapper import EvaluatorMDMWrapper
 from data_loaders.humanml.utils.word_vectorizer import WordVectorizer
 from data_loaders.humanml.utils.metrics import euclidean_distance_matrix
@@ -46,6 +46,16 @@ class MDMRewardFunction:
         dataset_name: str = 'humanml',
         device: str = 'cuda',
         word_vectorizer: Optional[WordVectorizer] = None,
+        # 新增参数
+        use_dense_reward: bool = False,
+        use_physics_reward: bool = False,
+        k_segments: int = 1,
+        max_motion_length: int = 196,
+        alpha: float = 0.5,
+        beta_s: float = 1.0,
+        beta_p: float = 0.1,
+        lambda_skate: float = 1.0,
+        lambda_jerk: float = 1.0,
     ):
         """
         初始化 MDM 奖励函数
@@ -54,9 +64,29 @@ class MDMRewardFunction:
             dataset_name: 数据集名称 ('humanml' 或 'kit')
             device: 设备
             word_vectorizer: 词向量化器（如果为 None，会尝试加载）
+            use_dense_reward: 是否使用分段密集打分 (Segment-Dense)，False=整体打分 (Global)
+            use_physics_reward: 是否计算物理正则化
+            k_segments: 文本拼接数量（用于校验或默认处理）
+            max_motion_length: 动作最大帧数限制
+            alpha: 负向惩罚权重
+            beta_s: 语义奖励权重
+            beta_p: 物理奖励权重
+            lambda_skate: 滑行惩罚权重
+            lambda_jerk: 加速度突变惩罚权重
         """
         self.device = device
         self.dataset_name = dataset_name
+        
+        # 新增配置参数
+        self.use_dense_reward = use_dense_reward
+        self.use_physics_reward = use_physics_reward
+        self.k_segments = k_segments
+        self.max_motion_length = max_motion_length
+        self.alpha = alpha
+        self.beta_s = beta_s
+        self.beta_p = beta_p
+        self.lambda_skate = lambda_skate
+        self.lambda_jerk = lambda_jerk
         
         # 初始化评估器
         self.evaluator = EvaluatorMDMWrapper(dataset_name, device)
@@ -205,6 +235,333 @@ class MDMRewardFunction:
             motions_processed = motions
         
         return motions_processed, m_lens
+    
+    def _truncate_motions(
+        self,
+        motions: torch.Tensor,
+        segments: Optional[List[List[Tuple[int, int]]]] = None,
+    ) -> Tuple[torch.Tensor, Optional[List[List[Tuple[int, int]]]]]:
+        """
+        截断动作到最大长度，并修正 segments
+        
+        参数:
+            motions: 动作序列 [B, njoints, nfeats, nframes]
+            segments: 分段信息 List[List[Tuple[int, int]]]，每个样本有 K 个 (start, end)
+            
+        返回:
+            motions_truncated: 截断后的动作
+            segments_corrected: 修正后的 segments（如果提供了 segments）
+        """
+        if motions.shape[-1] <= self.max_motion_length:
+            return motions, segments
+        
+        print(f"警告: 动作长度 {motions.shape[-1]} 超过最大长度 {self.max_motion_length}，将截断")
+        motions_truncated = motions[:, :, :, :self.max_motion_length]
+        
+        # 修正 segments
+        segments_corrected = None
+        if segments is not None:
+            segments_corrected = []
+            for seg_list in segments:
+                corrected_seg = []
+                for start, end in seg_list:
+                    # 确保结束时间不超过最大帧数
+                    end = min(end, self.max_motion_length)
+                    start = min(start, end)  # 确保 start <= end
+                    corrected_seg.append((start, end))
+                segments_corrected.append(corrected_seg)
+        
+        return motions_truncated, segments_corrected
+    
+    def _extract_foot_contact(
+        self,
+        motions: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        """
+        从动作数据中提取脚部接触标签
+        
+        参数:
+            motions: 动作序列 [B, njoints, nfeats, nframes] 或 [B, nframes, dim]
+            
+        返回:
+            foot_contact: 脚部接触标签 [B, nframes, 2] (left, right)，如果无法提取则返回 None
+        """
+        # HumanML 格式：动作数据的最后 4 个维度是脚部接触信息
+        # 格式: [B, nframes, dim]，最后 4 维是 [feet_l, feet_r, ...]
+        # 或者 [B, njoints, nfeats, nframes] 需要转换
+        
+        try:
+            if len(motions.shape) == 4:
+                # [B, njoints, nfeats, nframes] -> [B, nframes, njoints*nfeats]
+                B, njoints, nfeats, nframes = motions.shape
+                motions_flat = motions.permute(0, 3, 1, 2).reshape(B, nframes, -1)
+            else:
+                motions_flat = motions
+            
+            # 检查是否有足够的维度（至少需要 4 个维度用于脚部接触）
+            if motions_flat.shape[-1] < 4:
+                return None
+            
+            # 提取最后 4 维中的前 2 维（左右脚）
+            # 注意：实际格式可能是 [..., feet_l, feet_r, ...]，需要根据实际数据格式调整
+            # 这里假设最后 4 维是 [feet_l, feet_r, ...]
+            foot_contact = motions_flat[:, :, -4:-2]  # [B, nframes, 2]
+            
+            # 二值化（如果还不是二值）
+            foot_contact = (foot_contact > 0.5).float()
+            
+            return foot_contact
+        except Exception as e:
+            print(f"警告: 无法提取脚部接触信息: {e}")
+            return None
+    
+    def compute_physics_reward(
+        self,
+        motions: torch.Tensor,
+        foot_contact_labels: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        计算物理正则化奖励
+        
+        公式: R_phy = exp(-lambda_skate * L_skate - lambda_jerk * L_jerk)
+        
+        参数:
+            motions: 动作序列 [B, njoints, nfeats, nframes] 或 [B, nframes, dim]
+            foot_contact_labels: 脚部接触标签 [B, nframes, 2]（可选）
+            
+        返回:
+            physics_rewards: 物理奖励 [B]
+        """
+        with torch.no_grad():
+            # 转换格式
+            if len(motions.shape) == 4:
+                B, njoints, nfeats, nframes = motions.shape
+                motions_flat = motions.permute(0, 3, 1, 2).reshape(B, nframes, -1)
+            else:
+                motions_flat = motions
+                B, nframes = motions_flat.shape[:2]
+            
+            # 提取根节点速度（前 3 维通常是 root 信息）
+            # 假设前 3 维是 [root_rot_vel, root_linear_vel_x, root_linear_vel_z]
+            if motions_flat.shape[-1] >= 3:
+                root_vel = motions_flat[:, :, :2]  # [B, nframes, 2] (x, z 方向速度)
+            else:
+                # 如果无法提取，使用零速度
+                root_vel = torch.zeros(B, nframes, 2, device=motions.device)
+            
+            # 计算滑行惩罚 L_skate
+            L_skate = torch.zeros(B, device=motions.device)
+            if foot_contact_labels is not None:
+                # foot_contact_labels: [B, nframes, 2]
+                # 当脚接触地面时（contact=1），水平速度应该接近 0
+                contact_mask = foot_contact_labels.sum(dim=-1) > 0  # [B, nframes] (任意脚接触)
+                
+                for b in range(B):
+                    contact_frames = contact_mask[b]  # [nframes]
+                    if contact_frames.any():
+                        # 计算接触时的水平速度模长平方
+                        contact_vel = root_vel[b, contact_frames]  # [N_contact, 2]
+                        vel_squared = (contact_vel ** 2).sum(dim=-1)  # [N_contact]
+                        L_skate[b] = vel_squared.mean()
+            else:
+                # 如果没有脚部接触信息，仅计算 Jerk
+                L_skate = torch.zeros(B, device=motions.device)
+            
+            # 计算加速度突变惩罚 L_jerk
+            # 计算加速度：a_t = v_t - v_{t-1}
+            if nframes > 1:
+                # 使用所有关节的速度变化
+                velocities = motions_flat[:, 1:] - motions_flat[:, :-1]  # [B, nframes-1, dim]
+                accelerations = velocities[:, 1:] - velocities[:, :-1]  # [B, nframes-2, dim]
+                # 计算加速度的 L2 范数
+                jerk = (accelerations ** 2).sum(dim=-1).mean(dim=-1)  # [B]
+                L_jerk = jerk
+            else:
+                L_jerk = torch.zeros(B, device=motions.device)
+            
+            # 计算物理奖励
+            physics_rewards = torch.exp(
+                -self.lambda_skate * L_skate - self.lambda_jerk * L_jerk
+            )
+            
+            return physics_rewards
+    
+    def compute_semantic_reward(
+        self,
+        motions: torch.Tensor,
+        text_lists: List[List[str]],
+        segments: Optional[List[List[Tuple[int, int]]]] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        计算语义奖励
+        
+        参数:
+            motions: 动作序列 [B, njoints, nfeats, nframes]
+            text_lists: 文本列表 List[List[str]]，每个样本有 K 个子文本
+            segments: 分段信息 List[List[Tuple[int, int]]]，每个样本有 K 个 (start, end)
+            
+        返回:
+            semantic_rewards: 语义奖励 [B]
+            components: 包含 R_pos, R_neg 的字典
+        """
+        batch_size = motions.shape[0]
+        device = motions.device
+        
+        if not self.use_dense_reward:
+            # ========== Global Mode ==========
+            # 将每个样本的文本列表拼接
+            combined_texts = []
+            for text_list in text_lists:
+                combined_text = " ".join(text_list)
+                combined_texts.append(combined_text)
+            
+            # 准备文本输入
+            word_embs, pos_ohot, cap_lens = self._prepare_text_inputs(combined_texts)
+            
+            # 准备动作输入
+            motions_processed, m_lens = self._prepare_motion_inputs(motions)
+            
+            # 获取嵌入
+            with torch.no_grad():
+                text_embeddings, motion_embeddings = self.evaluator.get_co_embeddings(
+                    word_embs=word_embs,
+                    pos_ohot=pos_ohot,
+                    cap_lens=cap_lens,
+                    motions=motions_processed,
+                    m_lens=m_lens,
+                )
+            
+            # 计算余弦相似度
+            text_emb_norm = F.normalize(text_embeddings, p=2, dim=-1)
+            motion_emb_norm = F.normalize(motion_embeddings, p=2, dim=-1)
+            R_pos = (text_emb_norm * motion_emb_norm).sum(dim=-1)  # [B]
+            R_neg = torch.zeros(batch_size, device=device)
+            
+        else:
+            # ========== Segment-Dense Mode ==========
+            R_pos_list = []
+            R_neg_list = []
+            
+            for b in range(batch_size):
+                text_list = text_lists[b]
+                K = len(text_list)
+                
+                if segments is not None and len(segments[b]) == K:
+                    seg_list = segments[b]
+                else:
+                    # 如果没有提供 segments，均匀分割
+                    nframes = motions.shape[-1]
+                    seg_len = nframes // K
+                    seg_list = [(i * seg_len, (i + 1) * seg_len) for i in range(K)]
+                    # 最后一个分段到末尾
+                    seg_list[-1] = (seg_list[-1][0], nframes)
+                
+                # 提取动作片段
+                motion_segments = []
+                for start, end in seg_list:
+                    motion_seg = motions[b:b+1, :, :, start:end]  # [1, njoints, nfeats, seg_len]
+                    motion_segments.append(motion_seg)
+                
+                # 计算正向奖励 R_pos
+                pos_scores = []
+                for k in range(K):
+                    text_k = text_lists[b][k]
+                    motion_k = motion_segments[k]
+                    
+                    # 准备输入
+                    word_embs_k, pos_ohot_k, cap_lens_k = self._prepare_text_inputs([text_k])
+                    motions_processed_k, m_lens_k = self._prepare_motion_inputs(motion_k)
+                    
+                    # 获取嵌入
+                    with torch.no_grad():
+                        text_emb_k, motion_emb_k = self.evaluator.get_co_embeddings(
+                            word_embs=word_embs_k,
+                            pos_ohot=pos_ohot_k,
+                            cap_lens=cap_lens_k,
+                            motions=motions_processed_k,
+                            m_lens=m_lens_k,
+                        )
+                    
+                    # 计算相似度
+                    text_emb_k_norm = F.normalize(text_emb_k, p=2, dim=-1)
+                    motion_emb_k_norm = F.normalize(motion_emb_k, p=2, dim=-1)
+                    sim_k = (text_emb_k_norm * motion_emb_k_norm).sum(dim=-1)  # [1]
+                    pos_scores.append(sim_k.item())
+                
+                R_pos_b = torch.tensor(pos_scores, device=device).mean()
+                R_pos_list.append(R_pos_b)
+                
+                # 计算负向奖励 R_neg（自适应边界）
+                if K > 1:
+                    # 计算文本间相似度作为边界
+                    text_embs_all = []
+                    for k in range(K):
+                        text_k = text_lists[b][k]
+                        word_embs_k, pos_ohot_k, cap_lens_k = self._prepare_text_inputs([text_k])
+                        with torch.no_grad():
+                            text_emb_k, _ = self.evaluator.get_co_embeddings(
+                                word_embs=word_embs_k,
+                                pos_ohot=pos_ohot_k,
+                                cap_lens=cap_lens_k,
+                                motions=motions_processed_k[:1],  # 占位
+                                m_lens=m_lens_k[:1],
+                            )
+                        text_embs_all.append(text_emb_k)
+                    
+                    text_embs_all = torch.cat(text_embs_all, dim=0)  # [K, dim]
+                    text_embs_norm = F.normalize(text_embs_all, p=2, dim=-1)
+                    
+                    # 计算文本间相似度矩阵
+                    B_matrix = torch.mm(text_embs_norm, text_embs_norm.t())  # [K, K]
+                    
+                    # 计算干扰度
+                    neg_penalties = []
+                    for k in range(K):
+                        motion_k = motion_segments[k]
+                        motions_processed_k, m_lens_k = self._prepare_motion_inputs(motion_k)
+                        
+                        # 获取动作嵌入
+                        with torch.no_grad():
+                            # 使用占位文本嵌入
+                            word_embs_placeholder, pos_ohot_placeholder, cap_lens_placeholder = self._prepare_text_inputs([text_lists[b][0]])
+                            _, motion_emb_k = self.evaluator.get_co_embeddings(
+                                word_embs=word_embs_placeholder,
+                                pos_ohot=pos_ohot_placeholder,
+                                cap_lens=cap_lens_placeholder,
+                                motions=motions_processed_k,
+                                m_lens=m_lens_k,
+                            )
+                        
+                        motion_emb_k_norm = F.normalize(motion_emb_k, p=2, dim=-1)
+                        
+                        # 计算与所有文本的相似度
+                        s_kj = torch.mm(motion_emb_k_norm, text_embs_norm.t())  # [1, K]
+                        s_kj = s_kj.squeeze(0)  # [K]
+                        
+                        # 计算惩罚：ReLU(s_kj - B_kj)
+                        penalties = F.relu(s_kj - B_matrix[k])
+                        # 取最大违规项
+                        max_penalty = penalties.max()
+                        neg_penalties.append(max_penalty)
+                    
+                    R_neg_b = torch.stack(neg_penalties).mean()
+                else:
+                    R_neg_b = torch.tensor(0.0, device=device)
+                
+                R_neg_list.append(R_neg_b)
+            
+            R_pos = torch.stack(R_pos_list)  # [B]
+            R_neg = torch.stack(R_neg_list)  # [B]
+        
+        # 最终语义奖励
+        R_sem = R_pos - self.alpha * R_neg
+        
+        components = {
+            'R_pos': R_pos,
+            'R_neg': R_neg,
+        }
+        
+        return R_sem, components
 
 
 class MatchingScoreReward(MDMRewardFunction):
@@ -215,54 +572,67 @@ class MatchingScoreReward(MDMRewardFunction):
     距离越小，匹配度越高，奖励越大。
     """
     
-    def __call__(self, motions: torch.Tensor, prompts: List[str], lengths: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def __call__(
+        self,
+        motions: torch.Tensor,
+        prompts: Union[List[str], List[List[str]]],
+        lengths: Optional[torch.Tensor] = None,
+        text_lists: Optional[List[List[str]]] = None,
+        segments: Optional[List[List[Tuple[int, int]]]] = None,
+        foot_contact_labels: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         计算基于匹配分数的奖励
         
         参数:
             motions: 生成的动作序列 [B, njoints, nfeats, nframes]
-            prompts: 文本提示列表 [B]
+            prompts: 文本提示列表 [B] 或 List[List[str]]（向后兼容）
             lengths: 动作长度（可选）
+            text_lists: 文本列表 List[List[str]]，每个样本有 K 个子文本（新功能）
+            segments: 分段信息 List[List[Tuple[int, int]]]，每个样本有 K 个 (start, end)（新功能）
+            foot_contact_labels: 脚部接触标签 [B, nframes, 2]（新功能，可选）
             
         返回:
-            rewards: 奖励值 [B]，范围大约在 [0, 1]（经过归一化）
+            rewards: 奖励值 [B]
         """
+        # ========== 预处理：动作长度截断 ==========
+        motions, segments = self._truncate_motions(motions, segments)
+        
+        # ========== 兼容性处理：转换 prompts 为 text_lists ==========
+        if text_lists is None:
+            # 向后兼容：将 prompts 转换为 text_lists
+            if isinstance(prompts[0], str):
+                text_lists = [[p] for p in prompts]
+            else:
+                text_lists = prompts
+        
         batch_size = motions.shape[0]
+        device = motions.device
         
-        # 准备文本输入
-        word_embs, pos_ohot, cap_lens = self._prepare_text_inputs(prompts)
+        # ========== 计算语义奖励 ==========
+        R_sem, sem_components = self.compute_semantic_reward(
+            motions=motions,
+            text_lists=text_lists,
+            segments=segments,
+        )
         
-        # 准备动作输入
-        motions_processed, m_lens = self._prepare_motion_inputs(motions, lengths)
-        
-        # 获取文本和动作嵌入
-        with torch.no_grad():
-            text_embeddings, motion_embeddings = self.evaluator.get_co_embeddings(
-                word_embs=word_embs,
-                pos_ohot=pos_ohot,
-                cap_lens=cap_lens,
-                motions=motions_processed,
-                m_lens=m_lens,
+        # ========== 计算物理奖励 ==========
+        if self.use_physics_reward:
+            # 尝试提取脚部接触信息
+            if foot_contact_labels is None:
+                foot_contact_labels = self._extract_foot_contact(motions)
+            
+            R_phy = self.compute_physics_reward(
+                motions=motions,
+                foot_contact_labels=foot_contact_labels,
             )
+        else:
+            R_phy = torch.zeros(batch_size, device=device)
         
-        # 计算欧氏距离（匹配分数）
-        # 距离越小，匹配度越高
-        distances = torch.norm(text_embeddings - motion_embeddings, dim=-1)  # [B]
+        # ========== 总分聚合 ==========
+        R_total = self.beta_s * R_sem + self.beta_p * R_phy
         
-        # 将距离转换为奖励（距离越小，奖励越大）
-        # 使用负距离或指数衰减
-        # 方法1: 负距离（需要归一化）
-        # rewards = -distances
-        
-        # 方法2: 使用指数衰减（更稳定）
-        # rewards = torch.exp(-distances / scale)
-        
-        # 方法3: 线性归一化（简单有效）
-        # 假设距离范围大致在 [0, 10]，归一化到 [0, 1]
-        max_distance = 10.0  # 可根据实际情况调整
-        rewards = 1.0 - torch.clamp(distances / max_distance, 0, 1)
-        
-        return rewards
+        return R_total
 
 
 class RPrecisionReward(MDMRewardFunction):
@@ -281,18 +651,52 @@ class RPrecisionReward(MDMRewardFunction):
         super().__init__(*args, **kwargs)
         self.top_k = top_k
     
-    def __call__(self, motions: torch.Tensor, prompts: List[str], lengths: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def __call__(
+        self,
+        motions: torch.Tensor,
+        prompts: Union[List[str], List[List[str]]],
+        lengths: Optional[torch.Tensor] = None,
+        text_lists: Optional[List[List[str]]] = None,
+        segments: Optional[List[List[Tuple[int, int]]]] = None,
+        foot_contact_labels: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         计算基于 R-Precision 的奖励
         
         参数:
             motions: 生成的动作序列 [B, njoints, nfeats, nframes]
-            prompts: 文本提示列表 [B]
+            prompts: 文本提示列表 [B] 或 List[List[str]]（向后兼容）
             lengths: 动作长度（可选）
+            text_lists: 文本列表 List[List[str]]（新功能）
+            segments: 分段信息（新功能）
+            foot_contact_labels: 脚部接触标签（新功能）
             
         返回:
-            rewards: 奖励值 [B]，范围 [0, 1]
+            rewards: 奖励值 [B]
         """
+        # 使用基类的语义奖励计算（简化版，仅使用 Global 模式）
+        if text_lists is None:
+            if isinstance(prompts[0], str):
+                text_lists = [[p] for p in prompts]
+            else:
+                text_lists = prompts
+        
+        motions, segments = self._truncate_motions(motions, segments)
+        
+        # 计算语义奖励（使用 Global 模式）
+        R_sem, _ = self.compute_semantic_reward(motions, text_lists, segments)
+        
+        # 计算物理奖励
+        if self.use_physics_reward:
+            if foot_contact_labels is None:
+                foot_contact_labels = self._extract_foot_contact(motions)
+            R_phy = self.compute_physics_reward(motions, foot_contact_labels)
+        else:
+            R_phy = torch.zeros(motions.shape[0], device=motions.device)
+        
+        # 聚合
+        rewards = self.beta_s * R_sem + self.beta_p * R_phy
+        return rewards
         batch_size = motions.shape[0]
         
         # 准备输入
@@ -356,20 +760,35 @@ class CombinedMDMReward(MDMRewardFunction):
         self.matching_weight = matching_weight
         self.r_precision_weight = r_precision_weight
     
-    def __call__(self, motions: torch.Tensor, prompts: List[str], lengths: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def __call__(
+        self,
+        motions: torch.Tensor,
+        prompts: Union[List[str], List[List[str]]],
+        lengths: Optional[torch.Tensor] = None,
+        text_lists: Optional[List[List[str]]] = None,
+        segments: Optional[List[List[Tuple[int, int]]]] = None,
+        foot_contact_labels: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         计算组合奖励
         
         参数:
             motions: 生成的动作序列 [B, njoints, nfeats, nframes]
-            prompts: 文本提示列表 [B]
+            prompts: 文本提示列表 [B] 或 List[List[str]]（向后兼容）
             lengths: 动作长度（可选）
+            text_lists: 文本列表（新功能）
+            segments: 分段信息（新功能）
+            foot_contact_labels: 脚部接触标签（新功能）
             
         返回:
             rewards: 组合奖励值 [B]
         """
-        matching_rewards = self.matching_reward(motions, prompts, lengths)
-        r_precision_rewards = self.r_precision_reward(motions, prompts, lengths)
+        matching_rewards = self.matching_reward(
+            motions, prompts, lengths, text_lists, segments, foot_contact_labels
+        )
+        r_precision_rewards = self.r_precision_reward(
+            motions, prompts, lengths, text_lists, segments, foot_contact_labels
+        )
         
         combined_rewards = (
             self.matching_weight * matching_rewards +

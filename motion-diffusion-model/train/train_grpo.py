@@ -42,6 +42,16 @@ def create_reward_fn(
     tmr_normalization: str = 'linear',
     tmr_max_distance: float = 10.0,
     tmr_scale: float = 2.0,
+    # 新增奖励函数高级参数
+    use_dense_reward: bool = False,
+    use_physics_reward: bool = False,
+    k_segments: int = 1,
+    max_motion_length: int = 196,
+    alpha: float = 0.5,
+    beta_s: float = 1.0,
+    beta_p: float = 0.1,
+    lambda_skate: float = 1.0,
+    lambda_jerk: float = 1.0,
 ) -> Callable:
     """
     创建动作生成的奖励函数
@@ -64,10 +74,32 @@ def create_reward_fn(
         tmr_normalization: TMR 归一化方式 ('linear', 'exponential', 'sigmoid')
         tmr_max_distance: TMR 最大距离（用于线性归一化）
         tmr_scale: TMR 缩放因子（用于指数/Sigmoid 归一化）
+        use_dense_reward: 是否使用分段密集打分 (Segment-Dense)，False=整体打分 (Global)
+        use_physics_reward: 是否计算物理正则化
+        k_segments: 文本拼接数量（用于校验或默认处理）
+        max_motion_length: 动作最大帧数限制
+        alpha: 负向惩罚权重
+        beta_s: 语义奖励权重
+        beta_p: 物理奖励权重
+        lambda_skate: 滑行惩罚权重
+        lambda_jerk: 加速度突变惩罚权重
         
     返回:
         reward_fn: 计算奖励的函数
     """
+    # 奖励函数通用参数（适用于 MDM 和 TMR）
+    reward_kwargs = {
+        'use_dense_reward': use_dense_reward,
+        'use_physics_reward': use_physics_reward,
+        'k_segments': k_segments,
+        'max_motion_length': max_motion_length,
+        'alpha': alpha,
+        'beta_s': beta_s,
+        'beta_p': beta_p,
+        'lambda_skate': lambda_skate,
+        'lambda_jerk': lambda_jerk,
+    }
+    
     if reward_model_type == 'mdm':
         # 使用 MDM 评估器奖励函数
         try:
@@ -76,6 +108,7 @@ def create_reward_fn(
                 reward_type=reward_type,
                 dataset_name=dataset_name,
                 device=device,
+                **reward_kwargs,
             )
             print(f"✓ 使用 MDM 评估器奖励函数 (类型: {reward_type}, 数据集: {dataset_name})")
             return reward_fn
@@ -121,6 +154,7 @@ def create_reward_fn(
                 dataset_name=dataset_name,
                 device=device,
                 **tmr_kwargs,
+                **reward_kwargs,
             )
             print(f"✓ 使用 TMR 预训练模型奖励函数")
             print(f"  - 文本编码器: {tmr_text_encoder_path}")
@@ -258,6 +292,16 @@ def main():
         tmr_normalization=getattr(args, 'tmr_normalization', 'linear'),
         tmr_max_distance=getattr(args, 'tmr_max_distance', 10.0),
         tmr_scale=getattr(args, 'tmr_scale', 2.0),
+        # 新增奖励函数高级参数
+        use_dense_reward=getattr(args, 'use_dense_reward', False),
+        use_physics_reward=getattr(args, 'use_physics_reward', False),
+        k_segments=getattr(args, 'k_segments', 1),
+        max_motion_length=getattr(args, 'max_motion_length', 196),
+        alpha=getattr(args, 'alpha', 0.5),
+        beta_s=getattr(args, 'beta_s', 1.0),
+        beta_p=getattr(args, 'beta_p', 0.1),
+        lambda_skate=getattr(args, 'lambda_skate', 1.0),
+        lambda_jerk=getattr(args, 'lambda_jerk', 1.0),
     )
     
     # Create GRPO trainer
