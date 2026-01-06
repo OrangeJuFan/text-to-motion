@@ -2,6 +2,8 @@ from argparse import ArgumentParser
 import argparse
 import os
 import json
+import torch
+import platform
 
 
 def parse_and_load_from_model(parser):
@@ -51,7 +53,35 @@ def apply_rules(args):
     # For target conditioning
     if args.lambda_target_loc > 0.:
         args.multi_target_cond = True
+    
+    # Auto-detect device if 'auto' is specified
+    if hasattr(args, 'device') and args.device == 'auto':
+        args.device = auto_detect_device()
+    elif hasattr(args, 'device') and isinstance(args.device, str) and args.device.isdigit():
+        # Convert string number to int for backward compatibility
+        args.device = int(args.device)
+    
     return args
+
+
+def auto_detect_device():
+    """
+    自动检测最佳可用设备
+    
+    优先级:
+    1. CUDA (如果可用)
+    2. MPS (macOS Metal, 如果可用)
+    3. CPU (默认)
+    
+    返回:
+        str: 设备字符串 ('cuda:0', 'mps', 'cpu')
+    """
+    if torch.cuda.is_available():
+        return 'cuda:0'
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return 'mps'
+    else:
+        return 'cpu'
 
 
 def get_args_per_group_name(parser, args, group_name):
@@ -74,7 +104,8 @@ def get_model_path_from_args():
 def add_base_options(parser):
     group = parser.add_argument_group('base')
     group.add_argument("--cuda", default=True, type=bool, help="Use cuda device, otherwise use CPU.")
-    group.add_argument("--device", default=0, type=int, help="Device id to use.")
+    group.add_argument("--device", default='auto', type=str, 
+                       help="Device to use. Options: 'auto' (auto-detect), 'cuda' or 'cuda:0' (CUDA GPU), 'mps' (macOS Metal), 'cpu', or integer (CUDA device ID for backward compatibility).")
     group.add_argument("--seed", default=10, type=int, help="For fixing random seed.")
     group.add_argument("--batch_size", default=64, type=int, help="Batch size during training.")
     group.add_argument("--train_platform_type", default='NoPlatform', choices=['NoPlatform', 'ClearmlPlatform', 'TensorboardPlatform', 'WandBPlatform'], type=str,

@@ -424,7 +424,7 @@ tensorboard --logdir ./save/grpo_finetuned
 # ============================================
 python -m train.train_grpo \
     --model_path ./save/official_humanml_enc_512_50steps/model000750000.pt \
-    --save_dir ./save/exp1_tmr_dense_pos_only \
+    --save_dir ./save/grpo_finetuned_humanml_enc_512_50steps_750000_tmr_dense_pos_only \
     --dataset humanml \
     --batch_size 1 \
     --group_size 4 \
@@ -449,7 +449,7 @@ python -m train.train_grpo \
 # ============================================
 python -m train.train_grpo \
     --model_path ./save/official_humanml_enc_512_50steps/model000750000.pt \
-    --save_dir ./save/exp2_tmr_global \
+    --save_dir ./save/grpo_finetuned_humanml_enc_512_50steps_750000_tmr_global \
     --dataset humanml \
     --batch_size 1 \
     --group_size 4 \
@@ -471,7 +471,7 @@ python -m train.train_grpo \
 # ============================================
 python -m train.train_grpo \
     --model_path ./save/official_humanml_enc_512_50steps/model000750000.pt \
-    --save_dir ./save/exp3_tmr_dense_physics \
+    --save_dir ./save/grpo_finetuned_humanml_enc_512_50steps_750000_tmr_dense_physics \
     --dataset humanml \
     --batch_size 1 \
     --group_size 4 \
@@ -500,7 +500,7 @@ python -m train.train_grpo \
 # ============================================
 python -m train.train_grpo \
     --model_path ./save/official_humanml_enc_512_50steps/model000750000.pt \
-    --save_dir ./save/exp4_tmr_global_physics \
+    --save_dir ./save/grpo_finetuned_humanml_enc_512_50steps_750000_tmr_global_physics \
     --dataset humanml \
     --batch_size 1 \
     --group_size 4 \
@@ -526,7 +526,7 @@ python -m train.train_grpo \
 # ============================================
 python -m train.train_grpo \
     --model_path ./save/official_humanml_enc_512_50steps/model000750000.pt \
-    --save_dir ./save/exp5_tmr_dense_posneg_physics \
+    --save_dir ./save/grpo_finetuned_humanml_enc_512_50steps_750000_tmr_dense_posneg_physics \
     --dataset humanml \
     --batch_size 1 \
     --group_size 4 \

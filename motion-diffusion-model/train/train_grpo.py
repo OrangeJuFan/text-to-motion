@@ -189,8 +189,18 @@ def main():
     fixseed(args.seed)
     
     # Setup device
-    dist_util.setup_dist(args.device)
+    # 处理设备参数：如果是字符串，直接使用；如果是整数，转换为字符串
+    device_arg = args.device
+    if isinstance(device_arg, int):
+        if device_arg >= 0:
+            device_arg = f'cuda:{device_arg}'
+        else:
+            device_arg = 'cpu'
+    
+    dist_util.setup_dist(device_arg)
     device = dist_util.dev()
+    
+    print(f"使用设备: {device}")
     
     # Create save directory
     os.makedirs(args.save_dir, exist_ok=True)
@@ -280,8 +290,10 @@ def main():
     
     # Create reward function
     print(f"Creating reward function (model: {args.reward_model_type}, type: {args.reward_type})...")
+    # 将 device 对象转换为字符串用于奖励函数
+    device_str = str(device) if isinstance(device, torch.device) else device
     reward_fn = create_reward_fn(
-        device=device,
+        device=device_str,
         reward_model_type=args.reward_model_type,
         reward_type=args.reward_type,
         dataset_name=args.dataset,
