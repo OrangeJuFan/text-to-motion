@@ -441,7 +441,7 @@ python -m train.train_grpo \
     --k_segments 3 \
     --alpha 0.0 \
     --beta_s 1.0 \
-    --device 0
+    --device 3
 
 # ============================================
 # 实验 2: 整体TMR
@@ -463,7 +463,7 @@ python -m train.train_grpo \
     --tmr_similarity_type cosine \
     --tmr_normalization linear \
     --beta_s 1.0 \
-    --device 1
+    --device 4
 
 # ============================================
 # 实验 3: 分段密集TMR + 物理约束
@@ -626,4 +626,54 @@ python -m eval.eval_humanml --model_path ./save/humanml_trans_enc_512/model00047
 - lora_attnffn
 ```bash
 python -m eval.eval_humanml --model_path ./save/test_lora_lorar128_loraalpha16_attnffn/model000600000.pt
+```
+
+- 分段密集TMR（正向）
+```bash
+python -m eval.eval_humanml --model_path ./save/grpo_finetuned_humanml_enc_512_50steps_750000_tmr_dense_pos_only/model_final.pt
+```
+
+- 整体TMR
+```bash
+python -m eval.eval_humanml --model_path ./save/grpo_finetuned_humanml_enc_512_50steps_750000_tmr_global/model_final.pt
+```
+
+- 分段密集TMR + 物理约束
+```bash
+python -m eval.eval_humanml --model_path ./save/grpo_finetuned_humanml_enc_512_50steps_750000_tmr_dense_physics/model_final.pt
+```
+- 整体TMR + 物理约束
+```bash
+python -m eval.eval_humanml --model_path ./save/grpo_finetuned_humanml_enc_512_50steps_750000_tmr_global_physics/model_final.pt
+```
+- 分段密集TMR（正向+负向）+ 物理约束
+```bash
+python -m eval.eval_humanml --model_path ./save/grpo_finetuned_humanml_enc_512_50steps_750000_tmr_dense_posneg_physics/model_final.pt
+```
+
+
+- 官方mdm扩散50步
+```bash
+python -m eval.eval_humanml --model_path ./save/official_humanml_enc_512_50steps/model000750000.pt
+```
+
+- mdm 扩散1000步
+```bash
+python -m eval.eval_humanml --model_path ./save/my_humanml_trans_enc_512/model000600000.pt
+```
+
+
+- mdm 奖励函数用的matching score
+```bash
+python -m eval.eval_humanml --model_path ./save/grpo_finetuned_humanml_enc_512_50steps_750000_mdm_matching/model_final.pt
+```
+
+- mdm 奖励函数用的r_precision
+```bash
+python -m eval.eval_humanml --model_path ./save/grpo_finetuned_humanml_enc_512_50steps_750000_r_precision/model_final.pt
+```
+
+- mdm 奖励函数用的combined
+```bash
+python -m eval.eval_humanml --model_path ./save/grpo_finetuned_humanml_enc_512_50steps_750000_mdm_combined/model_final.pt
 ```
