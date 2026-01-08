@@ -52,6 +52,7 @@ def create_reward_fn(
     beta_p: float = 0.1,
     lambda_skate: float = 1.0,
     lambda_jerk: float = 1.0,
+    fps: float = 20.0,
 ) -> Callable:
     """
     创建动作生成的奖励函数
@@ -83,6 +84,7 @@ def create_reward_fn(
         beta_p: 物理奖励权重
         lambda_skate: 滑行惩罚权重
         lambda_jerk: 加速度突变惩罚权重
+        fps: 数据集帧率（帧/秒），用于将 duration 转换为帧数
         
     返回:
         reward_fn: 计算奖励的函数
@@ -98,6 +100,7 @@ def create_reward_fn(
         'beta_p': beta_p,
         'lambda_skate': lambda_skate,
         'lambda_jerk': lambda_jerk,
+        'fps': fps,
     }
     
     if reward_model_type == 'mdm':
@@ -314,6 +317,7 @@ def main():
         beta_p=getattr(args, 'beta_p', 0.1),
         lambda_skate=getattr(args, 'lambda_skate', 1.0),
         lambda_jerk=getattr(args, 'lambda_jerk', 1.0),
+        fps=getattr(args, 'fps', 20.0),
     )
     
     # Create GRPO trainer

@@ -439,6 +439,8 @@ def grpo_args():
                             help='Skating penalty weight for physics reward (default: 1.0)')
     grpo_group.add_argument('--lambda_jerk', type=float, default=1.0,
                             help='Jerk penalty weight for physics reward (default: 1.0)')
+    grpo_group.add_argument('--fps', type=float, default=20.0,
+                            help='Dataset frame rate (frames per second). HumanML=20.0, KIT=12.5 (default: 20.0)')
     
     # Flow-GRPO 特定参数（仅当 --grpo_type=flow_grpo 时使用）
     grpo_group.add_argument('--noise_scale', type=float, default=0.7,

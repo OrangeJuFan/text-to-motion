@@ -56,6 +56,7 @@ class MDMRewardFunction:
         beta_p: float = 0.1,
         lambda_skate: float = 1.0,
         lambda_jerk: float = 1.0,
+        fps: float = 20.0,  # 数据集帧率，HumanML=20, KIT=12.5
     ):
         """
         初始化 MDM 奖励函数
@@ -73,6 +74,7 @@ class MDMRewardFunction:
             beta_p: 物理奖励权重
             lambda_skate: 滑行惩罚权重
             lambda_jerk: 加速度突变惩罚权重
+            fps: 数据集帧率（帧/秒），用于将 duration 转换为帧数
         """
         self.device = device
         self.dataset_name = dataset_name
@@ -87,6 +89,7 @@ class MDMRewardFunction:
         self.beta_p = beta_p
         self.lambda_skate = lambda_skate
         self.lambda_jerk = lambda_jerk
+        self.fps = fps  # 数据集帧率
         
         # 初始化评估器
         self.evaluator = EvaluatorMDMWrapper(dataset_name, device)
@@ -391,6 +394,7 @@ class MDMRewardFunction:
         motions: torch.Tensor,
         text_lists: List[List[str]],
         segments: Optional[List[List[Tuple[int, int]]]] = None,
+        durations: Optional[List[List[float]]] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         计算语义奖励
@@ -399,6 +403,7 @@ class MDMRewardFunction:
             motions: 动作序列 [B, njoints, nfeats, nframes]
             text_lists: 文本列表 List[List[str]]，每个样本有 K 个子文本
             segments: 分段信息 List[List[Tuple[int, int]]]，每个样本有 K 个 (start, end)
+            durations: 每个文本段对应的持续时间（秒）List[List[float]]，每个样本有 K 个 duration
             
         返回:
             semantic_rewards: 语义奖励 [B]
@@ -447,9 +452,34 @@ class MDMRewardFunction:
                 K = len(text_list)
                 
                 if segments is not None and len(segments[b]) == K:
+                    # 如果提供了 segments，直接使用
                     seg_list = segments[b]
+                elif durations is not None and len(durations[b]) == K:
+                    # 如果提供了 durations，根据 duration * fps 计算 segments
+                    nframes = motions.shape[-1]
+                    seg_list = []
+                    current_frame = 0
+                    
+                    for k, duration in enumerate(durations[b]):
+                        # 计算该段的帧数
+                        seg_frames = int(duration * self.fps)
+                        # 确保不超过总帧数
+                        end_frame = min(current_frame + seg_frames, nframes)
+                        seg_list.append((current_frame, end_frame))
+                        current_frame = end_frame
+                        
+                        # 如果已经到达末尾，后续段都设为空
+                        if current_frame >= nframes:
+                            # 填充剩余的段
+                            for remaining_k in range(k + 1, K):
+                                seg_list.append((nframes, nframes))
+                            break
+                    
+                    # 如果最后一个段没有到达末尾，将其延伸到末尾
+                    if len(seg_list) > 0 and seg_list[-1][1] < nframes:
+                        seg_list[-1] = (seg_list[-1][0], nframes)
                 else:
-                    # 如果没有提供 segments，均匀分割
+                    # 如果没有提供 segments 或 durations，均匀分割
                     nframes = motions.shape[-1]
                     seg_len = nframes // K
                     seg_list = [(i * seg_len, (i + 1) * seg_len) for i in range(K)]
@@ -579,6 +609,7 @@ class MatchingScoreReward(MDMRewardFunction):
         lengths: Optional[torch.Tensor] = None,
         text_lists: Optional[List[List[str]]] = None,
         segments: Optional[List[List[Tuple[int, int]]]] = None,
+        durations: Optional[List[List[float]]] = None,
         foot_contact_labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
@@ -590,6 +621,7 @@ class MatchingScoreReward(MDMRewardFunction):
             lengths: 动作长度（可选）
             text_lists: 文本列表 List[List[str]]，每个样本有 K 个子文本（新功能）
             segments: 分段信息 List[List[Tuple[int, int]]]，每个样本有 K 个 (start, end)（新功能）
+            durations: 每个文本段对应的持续时间（秒）List[List[float]]（新功能）
             foot_contact_labels: 脚部接触标签 [B, nframes, 2]（新功能，可选）
             
         返回:
@@ -614,6 +646,7 @@ class MatchingScoreReward(MDMRewardFunction):
             motions=motions,
             text_lists=text_lists,
             segments=segments,
+            durations=durations,
         )
         
         # ========== 计算物理奖励 ==========
@@ -658,6 +691,7 @@ class RPrecisionReward(MDMRewardFunction):
         lengths: Optional[torch.Tensor] = None,
         text_lists: Optional[List[List[str]]] = None,
         segments: Optional[List[List[Tuple[int, int]]]] = None,
+        durations: Optional[List[List[float]]] = None,
         foot_contact_labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
@@ -669,6 +703,7 @@ class RPrecisionReward(MDMRewardFunction):
             lengths: 动作长度（可选）
             text_lists: 文本列表 List[List[str]]（新功能）
             segments: 分段信息（新功能）
+            durations: 每个文本段对应的持续时间（秒）List[List[float]]（新功能）
             foot_contact_labels: 脚部接触标签（新功能）
             
         返回:
@@ -684,7 +719,7 @@ class RPrecisionReward(MDMRewardFunction):
         motions, segments = self._truncate_motions(motions, segments)
         
         # 计算语义奖励（使用 Global 模式）
-        R_sem, _ = self.compute_semantic_reward(motions, text_lists, segments)
+        R_sem, _ = self.compute_semantic_reward(motions, text_lists, segments, durations)
         
         # 计算物理奖励
         if self.use_physics_reward:
@@ -767,6 +802,7 @@ class CombinedMDMReward(MDMRewardFunction):
         lengths: Optional[torch.Tensor] = None,
         text_lists: Optional[List[List[str]]] = None,
         segments: Optional[List[List[Tuple[int, int]]]] = None,
+        durations: Optional[List[List[float]]] = None,
         foot_contact_labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
@@ -778,16 +814,17 @@ class CombinedMDMReward(MDMRewardFunction):
             lengths: 动作长度（可选）
             text_lists: 文本列表（新功能）
             segments: 分段信息（新功能）
+            durations: 每个文本段对应的持续时间（秒）List[List[float]]（新功能）
             foot_contact_labels: 脚部接触标签（新功能）
             
         返回:
             rewards: 组合奖励值 [B]
         """
         matching_rewards = self.matching_reward(
-            motions, prompts, lengths, text_lists, segments, foot_contact_labels
+            motions, prompts, lengths, text_lists, segments, durations, foot_contact_labels
         )
         r_precision_rewards = self.r_precision_reward(
-            motions, prompts, lengths, text_lists, segments, foot_contact_labels
+            motions, prompts, lengths, text_lists, segments, durations, foot_contact_labels
         )
         
         combined_rewards = (
