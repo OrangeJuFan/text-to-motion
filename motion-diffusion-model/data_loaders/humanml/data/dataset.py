@@ -341,10 +341,15 @@ class Text2MotionDatasetV2(data.Dataset):
         word_embeddings = np.concatenate(word_embeddings, axis=0)
 
         # Crop the motions in to times of 4, and introduce small variations
-        if self.opt.unit_length < 10:
-            coin2 = np.random.choice(['single', 'single', 'double'])
-        else:
+        # 如果禁用了随机 Crop，跳过随机选择
+        if self.opt.disable_offset_aug:
+            # 禁用随机 Crop：使用固定的起始位置（从 0 开始）
             coin2 = 'single'
+        else:
+            if self.opt.unit_length < 10:
+                coin2 = np.random.choice(['single', 'single', 'double'])
+            else:
+                coin2 = 'single'
 
         if coin2 == 'double':
             m_length = (m_length // self.opt.unit_length - 1) * self.opt.unit_length
@@ -357,9 +362,11 @@ class Text2MotionDatasetV2(data.Dataset):
             original_length = m_length
             m_length = self.opt.fixed_len
         
-        idx = random.randint(0, len(motion) - m_length)
+        # 如果禁用了随机 Crop，使用固定的起始位置（从 0 开始）
         if self.opt.disable_offset_aug:
-            idx = random.randint(0, self.opt.unit_length)
+            idx = 0  # 固定从 0 开始，不使用随机偏移
+        else:
+            idx = random.randint(0, len(motion) - m_length)
         motion = motion[idx:idx+m_length]
 
         "Z Normalization"
@@ -776,7 +783,9 @@ class HumanML3D(data.Dataset):
         if opt.fixed_len > 0:
             opt.max_motion_length = opt.fixed_len
         is_autoregressive = kwargs.get('autoregressive', False)
-        opt.disable_offset_aug = is_autoregressive and (opt.fixed_len > 0) and (mode == 'eval')  # for autoregressive evaluation, use the start of the motion and not something from the middle
+        disable_random_crop = kwargs.get('disable_random_crop', False)
+        # 如果指定了 disable_random_crop，或者满足 autoregressive 条件，则禁用随机偏移
+        opt.disable_offset_aug = disable_random_crop or (is_autoregressive and (opt.fixed_len > 0) and (mode == 'eval'))  # for autoregressive evaluation or composite prompts with fixed durations, use the start of the motion
         self.opt = opt
         print('Loading dataset %s ...' % opt.dataset_name)
 

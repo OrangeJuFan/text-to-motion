@@ -89,6 +89,9 @@ class FlowGRPOTrainer:
         
         # 内存优化：在计算 log prob 后立即清理轨迹
         self.clear_trajectory_after_logprob = True
+        
+        # 用于保存奖励组件信息（R_pos, R_neg）
+        self._last_reward_components = None
     
     def _get_velocity_field(
         self,
@@ -657,8 +660,19 @@ class FlowGRPOTrainer:
                 torch.cuda.empty_cache()
         
         # ========== 阶段 2: 奖励计算 ==========
-        rewards = self.reward_fn(motions, expanded_prompts)  # [B*G]
-        rewards = rewards.to(self.device)
+        # 计算生成动作的奖励
+        # 注意: motions 需要转换为适合奖励函数的格式
+        reward_result = self.reward_fn(motions, expanded_prompts)  # [B*G] 或 (rewards, components)
+        
+        # 处理奖励函数返回值：可能是单个张量或元组
+        if isinstance(reward_result, tuple):
+            rewards, reward_components = reward_result
+            rewards = rewards.to(self.device)
+            # 保存组件信息用于统计
+            self._last_reward_components = reward_components
+        else:
+            rewards = reward_result.to(self.device)
+            self._last_reward_components = None
         
         # 检查奖励
         if torch.isnan(rewards).any():
@@ -688,9 +702,32 @@ class FlowGRPOTrainer:
         stats['max_reward'] = rewards.max().item()
         
         # 计算每个 prompt 的平均奖励（用于监控）
+        batch_size = rewards.shape[0] // self.group_size
         rewards_reshaped = rewards.view(batch_size, self.group_size)
         prompt_avg_rewards = rewards_reshaped.mean(dim=1)
         stats['prompt_avg_reward'] = prompt_avg_rewards.mean().item()
+        
+        # 提取 R_pos 和 R_neg 用于绘制曲线
+        if self._last_reward_components is not None:
+            R_pos = self._last_reward_components.get('R_pos')
+            R_neg = self._last_reward_components.get('R_neg')
+            if R_pos is not None:
+                # R_pos 和 R_neg 是 [B] 形状，需要扩展到 [B*G] 然后取平均
+                if R_pos.dim() == 1 and R_pos.shape[0] == batch_size:
+                    # 扩展到组大小
+                    R_pos_expanded = R_pos.unsqueeze(1).repeat(1, self.group_size).view(-1)
+                    R_neg_expanded = R_neg.unsqueeze(1).repeat(1, self.group_size).view(-1) if R_neg is not None else torch.zeros_like(R_pos_expanded)
+                    stats['R_pos'] = R_pos_expanded.mean().item()
+                    stats['R_neg'] = R_neg_expanded.mean().item()
+                else:
+                    stats['R_pos'] = R_pos.mean().item() if isinstance(R_pos, torch.Tensor) else R_pos
+                    stats['R_neg'] = R_neg.mean().item() if R_neg is not None and isinstance(R_neg, torch.Tensor) else (R_neg if R_neg is not None else 0.0)
+            else:
+                stats['R_pos'] = stats['mean_reward']  # 如果没有，使用 mean_reward 作为近似
+                stats['R_neg'] = 0.0
+        else:
+            stats['R_pos'] = stats['mean_reward']  # 如果没有，使用 mean_reward 作为近似
+            stats['R_neg'] = 0.0
         
         # 反向传播
         loss.backward()

@@ -553,9 +553,12 @@ class GRPOTrainer:
             motion_length
         )
         
-        # 使用固定噪声进行采样（用于可重现性和 log prob 计算）
-        # 我们将使用相同的噪声用于当前模型和参考模型
-        noise = torch.randn(*shape, device=self.device)
+        # 为组采样生成不同的噪声（每个样本使用不同的噪声种子）
+        # 重要：每个样本的噪声必须不同，以产生组内多样性
+        # torch.randn 已经为每个样本独立生成不同的噪声，这是正确的
+        noise = torch.randn(*shape, device=self.device)  # [B*G, C, H, W]
+        # 注意：虽然噪声不同，但为了 log prob 计算的一致性，参考模型需要使用相同的噪声
+        # 因此我们需要保存当前模型的噪声，然后在参考模型计算时使用相同的噪声
         
         # 使用当前模型采样（可训练，保存轨迹）
         with torch.set_grad_enabled(True):
@@ -603,6 +606,7 @@ class GRPOTrainer:
         
         # 使用参考模型计算 log probability（使用相同的轨迹，无需重新采样）
         # 注意：参考模型应该使用相同的轨迹来计算 log prob，而不是重新采样
+        # 这样可以确保 log_prob_current 和 log_prob_ref 在相同的轨迹上计算，保证 KL 散度的正确性
         with torch.no_grad():
             log_prob_ref = self.get_batch_log_prob(
                 self.ref_model,
@@ -637,8 +641,17 @@ class GRPOTrainer:
         # ========== 阶段 2: 奖励计算 ==========
         # 计算生成动作的奖励
         # 注意: motions 需要转换为适合奖励函数的格式
-        rewards = self.reward_fn(motions, expanded_prompts)  # [B*G]
-        rewards = rewards.to(self.device)
+        reward_result = self.reward_fn(motions, expanded_prompts)  # [B*G] 或 (rewards, components)
+        
+        # 处理奖励函数返回值：可能是单个张量或元组
+        if isinstance(reward_result, tuple):
+            rewards, reward_components = reward_result
+            rewards = rewards.to(self.device)
+            # 保存组件信息用于统计
+            self._last_reward_components = reward_components
+        else:
+            rewards = reward_result.to(self.device)
+            self._last_reward_components = None
         
         # 检查奖励是否包含 NaN
         if torch.isnan(rewards).any():
@@ -672,6 +685,28 @@ class GRPOTrainer:
         rewards_reshaped = rewards.view(batch_size, self.group_size)  # [B, G]
         prompt_avg_rewards = rewards_reshaped.mean(dim=1)  # [B] - 每个 prompt 的平均得分
         stats['prompt_avg_reward'] = prompt_avg_rewards.mean().item()  # 所有 prompt 的平均
+        
+        # 提取 R_pos 和 R_neg 用于绘制曲线
+        if self._last_reward_components is not None:
+            R_pos = self._last_reward_components.get('R_pos')
+            R_neg = self._last_reward_components.get('R_neg')
+            if R_pos is not None:
+                # R_pos 和 R_neg 是 [B] 形状，需要扩展到 [B*G] 然后取平均
+                if R_pos.dim() == 1 and R_pos.shape[0] == batch_size:
+                    # 扩展到组大小
+                    R_pos_expanded = R_pos.unsqueeze(1).repeat(1, self.group_size).view(-1)
+                    R_neg_expanded = R_neg.unsqueeze(1).repeat(1, self.group_size).view(-1) if R_neg is not None else torch.zeros_like(R_pos_expanded)
+                    stats['R_pos'] = R_pos_expanded.mean().item()
+                    stats['R_neg'] = R_neg_expanded.mean().item()
+                else:
+                    stats['R_pos'] = R_pos.mean().item() if isinstance(R_pos, torch.Tensor) else R_pos
+                    stats['R_neg'] = R_neg.mean().item() if R_neg is not None and isinstance(R_neg, torch.Tensor) else (R_neg if R_neg is not None else 0.0)
+            else:
+                stats['R_pos'] = stats['mean_reward']  # 如果没有，使用 mean_reward 作为近似
+                stats['R_neg'] = 0.0
+        else:
+            stats['R_pos'] = stats['mean_reward']  # 如果没有，使用 mean_reward 作为近似
+            stats['R_neg'] = 0.0
         
         # 检查损失是否异常
         if torch.isnan(loss) or torch.isinf(loss):

@@ -924,7 +924,15 @@ class TMRMatchingScoreReward(TMRRewardFunction):
         # ========== 总分聚合 ==========
         R_total = self.beta_s * R_sem + self.beta_p * R_phy
         
-        return R_total
+        # 返回奖励和组件信息（用于绘制曲线）
+        # 注意：为了兼容性，如果调用者期望单个张量，我们返回元组
+        # 训练器需要处理这种情况
+        return R_total, {
+            'R_pos': sem_components.get('R_pos', torch.zeros(batch_size, device=device)),
+            'R_neg': sem_components.get('R_neg', torch.zeros(batch_size, device=device)),
+            'R_sem': R_sem,
+            'R_phy': R_phy,
+        }
 
 
 class TMRCosineSimilarityReward(TMRRewardFunction):

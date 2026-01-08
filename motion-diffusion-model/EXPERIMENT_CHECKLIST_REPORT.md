@@ -278,9 +278,8 @@ def compute_logic_acc(motion_segments, text_lists, evaluator):
 2. $B_{matrix}$ 预计算和保存
 3. 长度合法性检查
 4. 数据加载时禁用随机 Crop
-5. 跨模型评估（MotionCLIP）
-6. Logic-Acc 指标计算
-7. 实时绘制 $R_{pos}$ vs $R_{neg}$ 曲线
+5. Logic-Acc 指标计算
+6. 实时绘制 $R_{pos}$ vs $R_{neg}$ 曲线
 
 ---
 
@@ -293,8 +292,7 @@ def compute_logic_acc(motion_segments, text_lists, evaluator):
 
 ### 中优先级（建议实现）
 1. **$B_{matrix}$ 预计算**（提高效率，确保一致性）
-2. **MotionCLIP 评估器**（评估对齐）
-3. **Logic-Acc 指标**（证明逻辑提升）
+2. **Logic-Acc 指标**（证明逻辑提升）
 
 ### 低优先级（可选）
 1. **实时绘制曲线**（监控工具）

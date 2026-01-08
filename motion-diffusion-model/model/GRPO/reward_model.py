@@ -592,6 +592,130 @@ class MDMRewardFunction:
         }
         
         return R_sem, components
+    
+    def compute_logic_accuracy(
+        self,
+        motions: torch.Tensor,
+        text_lists: List[List[str]],
+        segments: Optional[List[List[Tuple[int, int]]]] = None,
+        durations: Optional[List[List[float]]] = None,
+    ) -> Dict[str, float]:
+        """
+        计算 Logic-Acc 指标：对于第 k 个片段，检查 Sim(hat{y}_{T_k}, x_k) 是否是该行相似度矩阵中的最大值
+        
+        参数:
+            motions: 动作序列 [B, njoints, nfeats, nframes]
+            text_lists: 文本列表 List[List[str]]，每个样本有 K 个子文本
+            segments: 分段信息 List[List[Tuple[int, int]]]，每个样本有 K 个 (start, end)
+            durations: 每个文本段对应的持续时间（秒）List[List[float]]
+            
+        返回:
+            logic_acc_dict: 包含逻辑准确率的字典
+                - 'logic_acc': 整体逻辑准确率
+                - 'logic_acc_per_segment': 每个片段的准确率列表
+        """
+        if not self.use_dense_reward:
+            # Global 模式不支持 Logic-Acc
+            return {'logic_acc': 0.0, 'logic_acc_per_segment': []}
+        
+        batch_size = motions.shape[0]
+        device = motions.device
+        
+        all_correct = []
+        segment_accs = []
+        
+        for b in range(batch_size):
+            text_list = text_lists[b]
+            K = len(text_list)
+            
+            # 计算 segments（与 compute_semantic_reward 中的逻辑一致）
+            if segments is not None and len(segments[b]) == K:
+                seg_list = segments[b]
+            elif durations is not None and len(durations[b]) == K:
+                nframes = motions.shape[-1]
+                seg_list = []
+                current_frame = 0
+                for k, duration in enumerate(durations[b]):
+                    seg_frames = int(duration * self.fps)
+                    end_frame = min(current_frame + seg_frames, nframes)
+                    seg_list.append((current_frame, end_frame))
+                    current_frame = end_frame
+                    if current_frame >= nframes:
+                        for remaining_k in range(k + 1, K):
+                            seg_list.append((nframes, nframes))
+                        break
+                if len(seg_list) > 0 and seg_list[-1][1] < nframes:
+                    seg_list[-1] = (seg_list[-1][0], nframes)
+            else:
+                nframes = motions.shape[-1]
+                seg_len = nframes // K
+                seg_list = [(i * seg_len, (i + 1) * seg_len) for i in range(K)]
+                seg_list[-1] = (seg_list[-1][0], nframes)
+            
+            # 提取动作片段
+            motion_segments = []
+            for start, end in seg_list:
+                motion_seg = motions[b:b+1, :, :, start:end]
+                motion_segments.append(motion_seg)
+            
+            # 准备所有文本的嵌入
+            text_embs_all = []
+            for k in range(K):
+                text_k = text_list[k]
+                word_embs_k, pos_ohot_k, cap_lens_k = self._prepare_text_inputs([text_k])
+                with torch.no_grad():
+                    text_emb_k, _ = self.evaluator.get_co_embeddings(
+                        word_embs=word_embs_k,
+                        pos_ohot=pos_ohot_k,
+                        cap_lens=cap_lens_k,
+                        motions=motion_segments[k][:1],  # 占位
+                        m_lens=torch.tensor([motion_segments[k].shape[-1]], device=device),
+                    )
+                text_embs_all.append(text_emb_k)
+            
+            text_embs_all = torch.cat(text_embs_all, dim=0)  # [K, dim]
+            text_embs_norm = F.normalize(text_embs_all, p=2, dim=-1)
+            
+            # 对每个片段计算逻辑准确率
+            sample_correct = []
+            for k in range(K):
+                motion_k = motion_segments[k]
+                motions_processed_k, m_lens_k = self._prepare_motion_inputs(motion_k)
+                
+                # 获取动作嵌入
+                with torch.no_grad():
+                    word_embs_placeholder, pos_ohot_placeholder, cap_lens_placeholder = self._prepare_text_inputs([text_list[0]])
+                    _, motion_emb_k = self.evaluator.get_co_embeddings(
+                        word_embs=word_embs_placeholder,
+                        pos_ohot=pos_ohot_placeholder,
+                        cap_lens=cap_lens_placeholder,
+                        motions=motions_processed_k,
+                        m_lens=m_lens_k,
+                    )
+                
+                motion_emb_k_norm = F.normalize(motion_emb_k, p=2, dim=-1)
+                
+                # 计算与所有文本的相似度
+                similarities = torch.mm(motion_emb_k_norm, text_embs_norm.t())  # [1, K]
+                similarities = similarities.squeeze(0)  # [K]
+                
+                # 检查第 k 个文本的相似度是否是最大值
+                max_idx = similarities.argmax().item()
+                is_correct = (max_idx == k)
+                sample_correct.append(is_correct)
+            
+            all_correct.extend(sample_correct)
+            segment_accs.append(sum(sample_correct) / K)  # 该样本的片段准确率
+        
+        # 计算整体逻辑准确率
+        logic_acc = sum(all_correct) / len(all_correct) if len(all_correct) > 0 else 0.0
+        avg_segment_acc = sum(segment_accs) / len(segment_accs) if len(segment_accs) > 0 else 0.0
+        
+        return {
+            'logic_acc': logic_acc,
+            'avg_segment_acc': avg_segment_acc,
+            'logic_acc_per_segment': segment_accs,
+        }
 
 
 class MatchingScoreReward(MDMRewardFunction):
@@ -665,7 +789,15 @@ class MatchingScoreReward(MDMRewardFunction):
         # ========== 总分聚合 ==========
         R_total = self.beta_s * R_sem + self.beta_p * R_phy
         
-        return R_total
+        # 返回奖励和组件信息（用于绘制曲线）
+        # 注意：为了兼容性，如果调用者期望单个张量，我们返回元组
+        # 训练器需要处理这种情况
+        return R_total, {
+            'R_pos': sem_components.get('R_pos', torch.zeros(batch_size, device=device)),
+            'R_neg': sem_components.get('R_neg', torch.zeros(batch_size, device=device)),
+            'R_sem': R_sem,
+            'R_phy': R_phy,
+        }
 
 
 class RPrecisionReward(MDMRewardFunction):

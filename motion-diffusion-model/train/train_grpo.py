@@ -214,12 +214,16 @@ def main():
     
     # Load dataset
     print("Loading dataset...")
+    disable_random_crop = getattr(args, 'disable_random_crop', False)
+    if disable_random_crop:
+        print("⚠️  警告: 已禁用随机 Crop，确保 durations 固定时使用此选项")
     data_loader = get_dataset_loader(
         name=args.dataset,
         batch_size=args.batch_size,
         num_frames=None,
         split='train',
         hml_mode='train',
+        disable_random_crop=disable_random_crop,
     )
     
     # Create model and diffusion
@@ -373,6 +377,8 @@ def main():
     training_steps = []
     loss_values = []
     prompt_avg_reward_values = []
+    R_pos_values = []  # 用于绘制 R_pos vs R_neg 曲线
+    R_neg_values = []
     
     # 创建进度条
     pbar = tqdm(
@@ -415,6 +421,17 @@ def main():
                         prompt_avg_reward_values.append(stats['mean_reward'])
                     else:
                         prompt_avg_reward_values.append(0.0)
+                    
+                    # 收集 R_pos 和 R_neg 用于绘制曲线
+                    if 'R_pos' in stats:
+                        R_pos_values.append(stats['R_pos'])
+                    else:
+                        R_pos_values.append(0.0)
+                    
+                    if 'R_neg' in stats:
+                        R_neg_values.append(stats['R_neg'])
+                    else:
+                        R_neg_values.append(0.0)
                     
                     # 更新进度条显示
                     # 构建显示信息（只显示关键指标，避免过长）
@@ -474,7 +491,9 @@ def main():
                             loss_values,
                             prompt_avg_reward_values,
                             args.save_dir,
-                            step
+                            step,
+                            R_pos_values=R_pos_values,
+                            R_neg_values=R_neg_values,
                         )
                     
                     step += 1
@@ -512,12 +531,14 @@ def main():
         loss_values,
         prompt_avg_reward_values,
         args.save_dir,
-        step
+        step,
+        R_pos_values=R_pos_values,
+        R_neg_values=R_neg_values,
     )
     print(f"✓ Training curves saved to {args.save_dir}")
 
 
-def plot_training_curves(steps, losses, prompt_avg_rewards, save_dir, current_step):
+def plot_training_curves(steps, losses, prompt_avg_rewards, save_dir, current_step, R_pos_values=None, R_neg_values=None):
     """
     绘制训练曲线图
     
@@ -527,12 +548,17 @@ def plot_training_curves(steps, losses, prompt_avg_rewards, save_dir, current_st
         prompt_avg_rewards: 每个 prompt 的平均得分列表
         save_dir: 保存目录
         current_step: 当前训练步数
+        R_pos_values: R_pos 值列表（可选，用于绘制 R_pos vs R_neg 曲线）
+        R_neg_values: R_neg 值列表（可选，用于绘制 R_pos vs R_neg 曲线）
     """
     if len(steps) == 0:
         return
     
-    # 创建图表
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+    # 创建图表：如果有 R_pos 和 R_neg，创建 3 个子图，否则创建 2 个
+    if R_pos_values is not None and R_neg_values is not None and len(R_pos_values) > 0:
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 14))
+    else:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
     
     # 第一个图：Loss 损失曲线
     ax1.plot(steps, losses, 'b-', linewidth=1.5, label='Loss')
@@ -550,6 +576,16 @@ def plot_training_curves(steps, losses, prompt_avg_rewards, save_dir, current_st
     ax2.grid(True, alpha=0.3)
     ax2.legend()
     
+    # 第三个图：R_pos vs R_neg 曲线（如果提供了数据）
+    if R_pos_values is not None and R_neg_values is not None and len(R_pos_values) > 0:
+        ax3.plot(steps, R_pos_values, 'r-', linewidth=1.5, label='R_pos (Positive Reward)')
+        ax3.plot(steps, R_neg_values, 'orange', linewidth=1.5, label='R_neg (Negative Penalty)')
+        ax3.set_xlabel('Training Steps', fontsize=12)
+        ax3.set_ylabel('Reward Component Value', fontsize=12)
+        ax3.set_title('R_pos vs R_neg Curve (Segment-Dense Mode)', fontsize=14, fontweight='bold')
+        ax3.grid(True, alpha=0.3)
+        ax3.legend()
+    
     # 调整布局
     plt.tight_layout()
     
@@ -560,7 +596,10 @@ def plot_training_curves(steps, losses, prompt_avg_rewards, save_dir, current_st
     
     # 同时保存一个最新的版本（覆盖更新）
     latest_plot_path = os.path.join(save_dir, 'training_curves_latest.png')
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+    if R_pos_values is not None and R_neg_values is not None and len(R_pos_values) > 0:
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 14))
+    else:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
     
     ax1.plot(steps, losses, 'b-', linewidth=1.5, label='Loss')
     ax1.set_xlabel('Training Steps', fontsize=12)
@@ -575,6 +614,15 @@ def plot_training_curves(steps, losses, prompt_avg_rewards, save_dir, current_st
     ax2.set_title('Motion Average Score Curve', fontsize=14, fontweight='bold')
     ax2.grid(True, alpha=0.3)
     ax2.legend()
+    
+    if R_pos_values is not None and R_neg_values is not None and len(R_pos_values) > 0:
+        ax3.plot(steps, R_pos_values, 'r-', linewidth=1.5, label='R_pos (Positive Reward)')
+        ax3.plot(steps, R_neg_values, 'orange', linewidth=1.5, label='R_neg (Negative Penalty)')
+        ax3.set_xlabel('Training Steps', fontsize=12)
+        ax3.set_ylabel('Reward Component Value', fontsize=12)
+        ax3.set_title('R_pos vs R_neg Curve (Segment-Dense Mode)', fontsize=14, fontweight='bold')
+        ax3.grid(True, alpha=0.3)
+        ax3.legend()
     
     plt.tight_layout()
     plt.savefig(latest_plot_path, dpi=150, bbox_inches='tight')

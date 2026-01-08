@@ -441,7 +441,33 @@ python -m train.train_grpo \
     --k_segments 3 \
     --alpha 0.0 \
     --beta_s 1.0 \
+    --disable_random_crop \
     --device 3
+
+
+python -m train.train_grpo \
+    --model_path ./save/official_humanml_enc_512_50steps/model000750000.pt \
+    --save_dir ./save/grpo_finetuned_humanml_enc_512_50steps_750000_tmr_dense_pos_only \
+    --dataset humanml \
+    --batch_size 1 \
+    --group_size 4 \
+    --num_steps 1000 \
+    --learning_rate 1e-6 \
+    --reward_model_type tmr \
+    --reward_type matching \
+    --tmr_text_encoder_path ./model/GRPO/tmr_weights/text_encoder.pt \
+    --tmr_motion_encoder_path ./model/GRPO/tmr_weights/motion_encoder.pt \
+    --tmr_movement_encoder_path ./model/GRPO/tmr_weights/motion_decoder.pt \
+    --tmr_similarity_type cosine \
+    --tmr_normalization linear \
+    --use_dense_reward \
+    --k_segments 3 \
+    --alpha 0.0 \
+    --beta_s 1.0 \
+    --disable_random_crop \
+    --device mps
+
+
 #  训练10000步
 python -m train.train_grpo \
     --model_path ./save/official_humanml_enc_512_50steps/model000750000.pt \
@@ -462,6 +488,7 @@ python -m train.train_grpo \
     --k_segments 3 \
     --alpha 0.0 \
     --beta_s 1.0 \
+    --disable_random_crop \
     --device 3
 #  训练10000步 用余炫相似度
 python -m train.train_grpo \
@@ -481,6 +508,7 @@ python -m train.train_grpo \
     --k_segments 3 \
     --alpha 0.0 \
     --beta_s 1.0 \
+    --disable_random_crop \
     --device 4
 
 python -m train.train_grpo \
@@ -500,6 +528,7 @@ python -m train.train_grpo \
     --k_segments 3 \
     --alpha 0.0 \
     --beta_s 1.0 \
+    --disable_random_crop \
     --device 4
 
 # ============================================
@@ -522,6 +551,7 @@ python -m train.train_grpo \
     --tmr_similarity_type cosine \
     --tmr_normalization linear \
     --beta_s 1.0 \
+    --disable_random_crop \
     --device 4
 
 # ============================================
@@ -551,6 +581,7 @@ python -m train.train_grpo \
     --beta_p 0.1 \
     --lambda_skate 1.0 \
     --lambda_jerk 1.0 \
+    --disable_random_crop \
     --device 2
 
 # ============================================
@@ -577,6 +608,7 @@ python -m train.train_grpo \
     --beta_p 0.1 \
     --lambda_skate 1.0 \
     --lambda_jerk 1.0 \
+    --disable_random_crop \
     --device 3
 
 # ============================================
@@ -606,6 +638,34 @@ python -m train.train_grpo \
     --beta_p 0.1 \
     --lambda_skate 1.0 \
     --lambda_jerk 1.0 \
+    --disable_random_crop \
+    --device 4
+
+
+python -m train.train_grpo \
+    --model_path ./save/official_humanml_enc_512_50steps/model000750000.pt \
+    --save_dir ./save/grpo_finetuned_humanml_enc_512_50steps_750000_tmr_dense_posneg_physics \
+    --dataset humanml \
+    --batch_size 1 \
+    --group_size 4 \
+    --num_steps 1000 \
+    --learning_rate 1e-6 \
+    --reward_model_type tmr \
+    --reward_type matching \
+    --tmr_text_encoder_path ./model/GRPO/tmr_weights/text_encoder.pt \
+    --tmr_motion_encoder_path ./model/GRPO/tmr_weights/motion_encoder.pt \
+    --tmr_movement_encoder_path ./model/GRPO/tmr_weights/motion_decoder.pt \
+    --tmr_similarity_type cosine \
+    --tmr_normalization linear \
+    --use_dense_reward \
+    --use_physics_reward \
+    --k_segments 3 \
+    --alpha 0.5 \
+    --beta_s 1.0 \
+    --beta_p 0.1 \
+    --lambda_skate 1.0 \
+    --lambda_jerk 1.0 \
+    --disable_random_crop \
     --device 4
 ```
 
@@ -736,78 +796,3 @@ python -m eval.eval_humanml --model_path ./save/grpo_finetuned_humanml_enc_512_5
 ```bash
 python -m eval.eval_humanml --model_path ./save/grpo_finetuned_humanml_enc_512_50steps_750000_mdm_combined/model_final.pt
 ```
-
-
-
-
-
-
-
-
-
-按照下面的实验清单检查，不要直接实施改动：### 一、 复合数据集构造模块 (Data Construction)
-*目标：生成一个包含 $K=3/4/5$ 组合的 `.npy` 索引文件，确保所有 实验 跑在同一套指令上。*
-
-- [ ] **确定性切片记录**：保存的每个样本必须包含：
-    - `composite_prompt`: 拼接后的长句子（如 "First A, then B, finally C"）。
-    - `sub_prompts`: 原始的三个短文本描述（用于算 $R_{pos}$ 和 $R_{neg}$）。
-    - `durations`: 对应的帧数数组（如 `[60, 45, 50]`），这是 Reward 计算的**上帝视角**。
-    - `source_ids`: 原始 HumanML3D 的 ID，便于回溯。
-- [ ] **语义基准矩阵 $B$ 预计算**：
-    - 在构造 $K=3$ 数据时，直接计算这三个 `sub_prompts` 之间的 Text-to-Text 相似度。
-    - 保存为 `B_matrix`：一个 $3 \times 3$ 的矩阵，用于 `Negative Discrimination` 的自适应 Margins。
-- [ ] **长度合法性检查**：确保 K 个动作的总长度 $L_{sum}$ 尽量接近 196 帧（MDM 窗口），避免过度的 Padding 或裁剪导致语义丢失。
-
----
-
-### 二、 奖励函数实现模块 (Reward Engineering)
-*目标：精准实现论文中的“自适应对比锐化”逻辑。*
-
-- [ ] **$R_{pos}$ (正向匹配)**：
-    - 检查是否按 `durations` 对生成的 $\hat{y}$ 进行了切片。
-    - 确保 `TMR_Motion_Encoder` 和 `TMR_Text_Encoder` 处于 `eval()` 模式且不计算梯度。
-- [ ] **$R_{neg}$ (自适应负向判别)**：
-    - **逻辑检查**：是否实现了 $\max_{j \neq k} [ \max(0, s_{k,j} - B_{k,j}) ]$。
-    - **分母检查**：是否对所有的 $K$ 个分段取了平均（$1/K \sum$）。
-- [ ] **$R_{phy}$ (全局物理正则)**：
-    - **Jerk Penalty**：加速度变化的计算是否跨越了拼接点？（确保全序列平滑）。
-    - **Foot Skating**：检查 263 维特征中 `Foot Contact` 标签的使用是否正确。
-- [ ] **奖励合成**：$R_{total} = w_s (R_{pos} - \alpha R_{neg}) + w_p R_{phy}$。
-
----
-
-### 三、 GRPO 训练循环模块 (Training Loop)
-*目标：实现离散/连续架构通用的无 Critic 更新。*
-
-- [ ] **组采样 (Group Sampling)**：
-    - 每个样本是否生成了 $G$ 条不同的轨迹（使用不同的 Noise Seed 或 Sampling Temperature）。
-- [ ] **相对优势计算 (Advantage Estimation)**：
-    - 确认 Advantage $A_i$ 是在**当前 Prompt 的组内**进行标准化的（$\frac{r_i - \text{mean}}{\text{std}}$），而不是在整个 Batch 间跨 Prompt 算。
-- [ ] **异构梯度估计**：
-    - **MDM 分支**：梯度是否按 DDPO 的公式进行了加权？（即 $A_i \times \text{Denoising\_MSE}$）。
-    - **T2M-GPT 分支**：是否正确累加了 Token 级别的 Log-Prob。
-- [ ] **参考模型约束 ($\pi_{ref}$)**：
-    - 检查 KL 散度的计算是否正确。
-    - 确认 `reference_model` 的参数已被 `requires_grad_(False)` 且权重不再更新。
-
----
-
-### 四、 评估与评估对齐模块 (Evaluation Protocol)
-*目标：证明逻辑提升，并防范 Reward Hacking。*
-
-- [ ] **跨模型评估 (Cross-Evaluator)**：
-    - **重要**：训练用 TMR 做 Reward，测试时是否使用 **MotionCLIP** 跑 R-Precision 指标？
-- [ ] **Logic-Acc 指标计算**：
-    - 确认分类器识别逻辑：对于第 $k$ 个片段，$\text{Sim}(\hat{y}_{T_k}, x_k)$ 是否是该行相似度矩阵中的最大值？
-
-
-### 给您的特别提醒：
-
-**1. 关于 $B_{k,j}$ 的零惩罚阈值：**
-在代码实现 $R_{neg}$ 时，一定要写成 `torch.clamp(s_kj - B_kj, min=0)`。如果忘记 clamp，当动作比文本更不像时，Reward 可能会意外变成正的。
-
-**2. 关于数据加载：**
-既然您提前构造了 `.npy`，在 Dataloader 里一定要关掉所有随机 Crop。因为你的 `durations` 是死的，一旦模型输入偏移了 1 帧，所有的分段奖励都会出错。
-
-**3. 关于训练步数：**
-针对您计划的 1000 step，建议每 200 step 保存一个 checkpoint，并实时绘制 **$R_{pos}$ vs $R_{neg}$** 的曲线。如果 $R_{neg}$ 掉不下去，说明 $\alpha$ 可能设小了。
