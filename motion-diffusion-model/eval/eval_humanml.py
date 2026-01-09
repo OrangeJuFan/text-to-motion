@@ -309,12 +309,44 @@ if __name__ == '__main__':
 
     logger.log("creating data loader...")
     split = 'test'
-    gt_loader = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=None, split=split, hml_mode='gt')
-    # gen_loader = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=None, split=split, hml_mode='eval')
-    # added new features + support for prefix completion:
-    gen_loader = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=None, split=split, hml_mode='eval',
-                                    fixed_len=args.context_len+args.pred_len, pred_len=args.pred_len, device=dist_util.dev(),
-                                    autoregressive=args.autoregressive)
+    
+    # 检查是否使用复合数据集
+    use_composite_dataset = getattr(args, 'use_composite_dataset', False)
+    composite_data_path = getattr(args, 'composite_data_path', None)
+    composite_k_segments = getattr(args, 'composite_k_segments', 3)
+    
+    if use_composite_dataset:
+        if composite_data_path is None:
+            raise ValueError("--composite_data_path is required when --use_composite_dataset is set")
+        if not os.path.exists(composite_data_path):
+            raise FileNotFoundError(f"Composite dataset file not found: {composite_data_path}")
+        logger.log(f"Using composite dataset: {composite_data_path}, K={composite_k_segments}")
+        # 对于评估，使用复合数据集作为 gen_loader
+        # gt_loader 仍然使用标准数据集（用于计算 FID 等指标）
+        gt_loader = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=None, split=split, hml_mode='gt')
+        gen_loader = get_dataset_loader(
+            name=args.dataset, 
+            batch_size=args.batch_size, 
+            num_frames=None, 
+            split=split, 
+            hml_mode='eval',
+            fixed_len=args.context_len+args.pred_len, 
+            pred_len=args.pred_len, 
+            device=dist_util.dev(),
+            autoregressive=args.autoregressive,
+            use_composite_dataset=True,
+            composite_data_path=composite_data_path,
+            composite_k_segments=composite_k_segments,
+            cache_path=getattr(args, 'cache_path', '.'),
+            abs_path=getattr(args, 'abs_path', '.'),
+        )
+    else:
+        gt_loader = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=None, split=split, hml_mode='gt')
+        # gen_loader = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=None, split=split, hml_mode='eval')
+        # added new features + support for prefix completion:
+        gen_loader = get_dataset_loader(name=args.dataset, batch_size=args.batch_size, num_frames=None, split=split, hml_mode='eval',
+                                        fixed_len=args.context_len+args.pred_len, pred_len=args.pred_len, device=dist_util.dev(),
+                                        autoregressive=args.autoregressive)
 
     num_actions = gen_loader.dataset.num_actions
 

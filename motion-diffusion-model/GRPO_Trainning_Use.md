@@ -8,9 +8,10 @@
 2. [GRPO 核心参数](#grpo-核心参数)
 3. [奖励模型参数](#奖励模型参数)
 4. [奖励函数高级参数](#奖励函数高级参数)
-5. [Flow-GRPO 参数](#flow-grpo-参数)
-6. [训练示例](#训练示例)
-7. [参数说明表格](#参数说明表格)
+5. [复合数据集参数](#复合数据集参数)
+6. [Flow-GRPO 参数](#flow-grpo-参数)
+7. [训练示例](#训练示例)
+8. [参数说明表格](#参数说明表格)
 
 ## 快速开始
 
@@ -150,6 +151,42 @@
 | `--beta_p` | float | 0.1 | 物理奖励权重 |
 | `--lambda_skate` | float | 1.0 | 滑行惩罚权重（用于物理奖励） |
 | `--lambda_jerk` | float | 1.0 | 加速度突变惩罚权重（用于物理奖励） |
+| `--fps` | float | 20.0 | 数据集帧率（HumanML=20.0, KIT=12.5） |
+| `--disable_random_crop` | flag | False | 禁用随机 Crop 和偏移增强。使用复合数据集时必须启用 |
+
+## 复合数据集参数
+
+这些参数用于使用预构造的复合数据集（包含 K=3/4/5 个动作组合）进行训练和评估。
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--use_composite_dataset` | flag | False | 启用复合数据集（由 construct_composite_dataset.py 构造） |
+| `--composite_data_path` | str | None | 复合数据集 .npy 文件路径（使用复合数据集时必需） |
+| `--composite_k_segments` | int | 3 | 复合数据集的分段数 K（3, 4, 或 5） |
+
+### 参数说明
+
+**复合数据集**：
+- 复合数据集是通过 `scripts/construct_composite_dataset.py` 预先构造的数据集
+- 每个样本包含 K 个动作的组合，以及对应的文本描述、durations（秒数）、B_matrix 等
+- 使用复合数据集时，`--disable_random_crop` 会自动启用，因为 durations 是固定的
+- `--composite_k_segments` 应该与构造数据集时的 `--k_segments` 一致
+- `--k_segments`（奖励函数参数）应该与 `--composite_k_segments` 一致
+
+**构造复合数据集**：
+```bash
+python scripts/construct_composite_dataset.py \
+    --dataset humanml \
+    --split train \
+    --k_segments 3 \
+    --output_dir dataset/HumanML3D/composite \
+    --target_length 196 \
+    --tolerance 20 \
+    --fps 20.0 \
+    --max_samples 1000 \
+    --compute_b_matrix \
+    --device cuda
+```
 
 ### 参数说明
 
@@ -195,6 +232,16 @@
 | `--clip_epsilon` | float | ❌ | 0.2 | PPO 裁剪参数 ε |
 | `--kl_penalty` | float | ❌ | 1.0 | KL 散度惩罚权重 β |
 | `--grpo_type` | str | ❌ | `normal_grpo` | GRPO 训练器类型：`normal_grpo` 或 `flow_grpo` |
+
+### 复合数据集参数
+
+| 参数 | 类型 | 必需 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `--use_composite_dataset` | flag | ❌ | False | 启用复合数据集（由 construct_composite_dataset.py 构造） |
+| `--composite_data_path` | str | ✅* | None | 复合数据集 .npy 文件路径 |
+| `--composite_k_segments` | int | ❌ | 3 | 复合数据集的分段数 K（3, 4, 或 5） |
+
+*仅在 `--use_composite_dataset` 时必需
 
 ### TMR 特定参数
 
@@ -334,6 +381,67 @@ python -m train.train_grpo \
     --device 1
 ```
 
+### 示例 7: 使用复合数据集进行 GRPO 训练
+
+```bash
+# 首先构造复合数据集
+python scripts/construct_composite_dataset.py \
+    --dataset humanml \
+    --split train \
+    --k_segments 3 \
+    --output_dir dataset/HumanML3D/composite \
+    --max_samples 1000 \
+    --compute_b_matrix \
+    --device cuda
+
+# 使用复合数据集训练
+python -m train.train_grpo \
+    --model_path ./save/official_humanml_enc_512_50steps/model000750000.pt \
+    --save_dir ./save/grpo_composite_k3 \
+    --dataset humanml \
+    --batch_size 1 \
+    --group_size 4 \
+    --num_steps 1000 \
+    --learning_rate 1e-6 \
+    --reward_model_type tmr \
+    --reward_type cosine \
+    --tmr_text_encoder_path ./model/GRPO/tmr_weights/text_encoder.pt \
+    --tmr_motion_encoder_path ./model/GRPO/tmr_weights/motion_encoder.pt \
+    --tmr_movement_encoder_path ./model/GRPO/tmr_weights/motion_decoder.pt \
+    --use_composite_dataset \
+    --composite_data_path dataset/HumanML3D/composite/composite_k3_train.npy \
+    --composite_k_segments 3 \
+    --use_dense_reward \
+    --k_segments 3 \
+    --fps 20.0 \
+    --disable_random_crop \
+    --device cuda
+```
+
+### 示例 8: 使用复合数据集进行评估
+
+```bash
+# 首先构造测试集的复合数据集
+python scripts/construct_composite_dataset.py \
+    --dataset humanml \
+    --split test \
+    --k_segments 3 \
+    --output_dir dataset/HumanML3D/composite \
+    --max_samples 1000 \
+    --compute_b_matrix \
+    --device cuda
+
+# 使用复合数据集评估
+python -m eval.eval_humanml \
+    --model_path ./save/grpo_composite_k3/model_final.pt \
+    --dataset humanml \
+    --eval_mode wo_mm \
+    --use_composite_dataset \
+    --composite_data_path dataset/HumanML3D/composite/composite_k3_test.npy \
+    --composite_k_segments 3 \
+    --device cuda
+```
+
 ## 注意事项
 
 1. **TMR 权重文件**: 使用 TMR 奖励函数时，必须提供三个独立的权重文件路径：
@@ -362,6 +470,14 @@ python -m train.train_grpo \
    - 有助于生成更符合物理规律的动作
    - 会增加计算成本
    - 建议与语义奖励结合使用（`--beta_s=1.0`, `--beta_p=0.1`）
+
+7. **复合数据集**:
+   - 使用预构造的复合数据集可以确保所有实验使用同一套指令
+   - 复合数据集包含 K 个动作的组合，以及预计算的 B_matrix
+   - 使用复合数据集时，`--disable_random_crop` 会自动启用
+   - `--composite_k_segments` 应该与构造数据集时的 `--k_segments` 一致
+   - `--k_segments`（奖励函数参数）应该与 `--composite_k_segments` 一致
+   - 构造复合数据集的方法见 [COMPOSITE_DATASET_USAGE.md](./COMPOSITE_DATASET_USAGE.md)
 
 **可视化平台选项**：
 
@@ -737,6 +853,9 @@ python -m train.train_grpo \
 
 
 **评估模型**
+
+### 标准数据集评估
+
 - 50步模型
 ```bash
 python -m eval.eval_humanml --model_path ./save/humanml_trans_enc_512/model000475000.pt
@@ -796,3 +915,34 @@ python -m eval.eval_humanml --model_path ./save/grpo_finetuned_humanml_enc_512_5
 ```bash
 python -m eval.eval_humanml --model_path ./save/grpo_finetuned_humanml_enc_512_50steps_750000_mdm_combined/model_final.pt
 ```
+
+### 复合数据集评估
+
+使用复合数据集进行评估时，需要先构造测试集的复合数据集，然后使用 `--use_composite_dataset` 参数：
+
+```bash
+# 构造测试集复合数据集
+python scripts/construct_composite_dataset.py \
+    --dataset humanml \
+    --split test \
+    --k_segments 3 \
+    --output_dir dataset/HumanML3D/composite \
+    --max_samples 1000 \
+    --compute_b_matrix \
+    --device cuda
+
+# 使用复合数据集评估
+python -m eval.eval_humanml \
+    --model_path ./save/grpo_composite_k3/model_final.pt \
+    --dataset humanml \
+    --eval_mode wo_mm \
+    --use_composite_dataset \
+    --composite_data_path dataset/HumanML3D/composite/composite_k3_test.npy \
+    --composite_k_segments 3 \
+    --device cuda
+```
+
+**注意**：
+- 评估时使用复合数据集作为生成数据源
+- FID 等指标仍基于标准数据集（ground truth）计算
+- 确保评估时使用的 `--composite_k_segments` 与训练时一致

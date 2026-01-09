@@ -215,8 +215,23 @@ def main():
     # Load dataset
     print("Loading dataset...")
     disable_random_crop = getattr(args, 'disable_random_crop', False)
-    if disable_random_crop:
+    use_composite_dataset = getattr(args, 'use_composite_dataset', False)
+    composite_data_path = getattr(args, 'composite_data_path', None)
+    composite_k_segments = getattr(args, 'composite_k_segments', 3)
+    
+    if use_composite_dataset:
+        if composite_data_path is None:
+            raise ValueError("--composite_data_path is required when --use_composite_dataset is set")
+        if not os.path.exists(composite_data_path):
+            raise FileNotFoundError(f"Composite dataset file not found: {composite_data_path}")
+        print(f"✓ 使用复合数据集: {composite_data_path}")
+        print(f"  K={composite_k_segments}")
+        # 使用复合数据集时，必须禁用随机 Crop
+        disable_random_crop = True
+        print("⚠️  警告: 已自动禁用随机 Crop（复合数据集要求）")
+    elif disable_random_crop:
         print("⚠️  警告: 已禁用随机 Crop，确保 durations 固定时使用此选项")
+    
     data_loader = get_dataset_loader(
         name=args.dataset,
         batch_size=args.batch_size,
@@ -224,6 +239,11 @@ def main():
         split='train',
         hml_mode='train',
         disable_random_crop=disable_random_crop,
+        use_composite_dataset=use_composite_dataset,
+        composite_data_path=composite_data_path,
+        composite_k_segments=composite_k_segments,
+        cache_path=getattr(args, 'cache_path', '.'),
+        abs_path=getattr(args, 'abs_path', '.'),
     )
     
     # Create model and diffusion
@@ -402,6 +422,17 @@ def main():
                     'lengths': cond['y'].get('lengths', None),
                     'mask': cond['y'].get('mask', None),
                 }
+                
+                # 如果使用复合数据集，添加复合数据集特有字段
+                if use_composite_dataset:
+                    batch['composite_prompts'] = cond['y'].get('composite_prompts', [])
+                    batch['sub_prompts'] = cond['y'].get('sub_prompts', [])
+                    batch['durations'] = cond['y'].get('durations', [])
+                    batch['durations_frames'] = cond['y'].get('durations_frames', [])
+                    batch['text_lists'] = cond['y'].get('text_lists', [])
+                    # 使用 composite_prompts 作为主要文本
+                    if batch['composite_prompts']:
+                        batch['text'] = batch['composite_prompts']
                 
                 # Training step
                 try:

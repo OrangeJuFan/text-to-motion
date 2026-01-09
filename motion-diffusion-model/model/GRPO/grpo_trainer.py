@@ -641,7 +641,32 @@ class GRPOTrainer:
         # ========== 阶段 2: 奖励计算 ==========
         # 计算生成动作的奖励
         # 注意: motions 需要转换为适合奖励函数的格式
-        reward_result = self.reward_fn(motions, expanded_prompts)  # [B*G] 或 (rewards, components)
+        
+        # 检查是否使用复合数据集
+        use_composite = 'text_lists' in batch and batch.get('text_lists') is not None
+        if use_composite:
+            # 扩展复合数据集字段以匹配 expanded_prompts
+            text_lists = batch.get('text_lists', [])
+            durations = batch.get('durations', [])
+            
+            # 扩展 text_lists 和 durations 以匹配组采样
+            expanded_text_lists = []
+            expanded_durations = []
+            for i, text_list in enumerate(text_lists):
+                expanded_text_lists.extend([text_list] * self.group_size)
+                if durations and i < len(durations):
+                    expanded_durations.extend([durations[i]] * self.group_size)
+            
+            # 调用奖励函数，传递复合数据集信息
+            # 注意：B_matrix 会在奖励函数内部根据 text_lists 动态计算
+            reward_result = self.reward_fn(
+                motions, 
+                expanded_prompts,
+                text_lists=expanded_text_lists if expanded_text_lists else None,
+                durations=expanded_durations if expanded_durations else None,
+            )
+        else:
+            reward_result = self.reward_fn(motions, expanded_prompts)  # [B*G] 或 (rewards, components)
         
         # 处理奖励函数返回值：可能是单个张量或元组
         if isinstance(reward_result, tuple):
