@@ -402,6 +402,10 @@ def grpo_args():
                             help='PPO clipping parameter')
     grpo_group.add_argument('--kl_penalty', type=float, default=1,
                             help='KL divergence penalty weight')
+    grpo_group.add_argument('--num_epochs', type=int, default=1,
+                            help='Number of update epochs per batch (Multi-Epoch PPO, default: 1 for single-epoch)')
+    grpo_group.add_argument('--kl_threshold', type=float, default=0.01,
+                            help='KL divergence threshold for early stopping in multi-epoch updates (default: 0.01)')
     grpo_group.add_argument('--grpo_type', type=str, default='normal_grpo',
                             choices=['normal_grpo', 'flow_grpo'],
                             help='GRPO trainer type: normal_grpo (standard GRPO) or flow_grpo (Flow-based GRPO with SDE)')

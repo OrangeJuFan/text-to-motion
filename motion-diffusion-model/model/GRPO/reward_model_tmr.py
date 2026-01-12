@@ -656,7 +656,19 @@ class TMRRewardFunction:
             # 将每个样本的文本列表拼接
             combined_texts = []
             for text_list in text_lists:
-                combined_text = " ".join(text_list)
+                # 处理嵌套列表：如果 text_list 中的元素是列表，先展平
+                if text_list and isinstance(text_list[0], list):
+                    # text_list 是 [['prompt1'], ['prompt2'], ...] 格式，需要展平
+                    flat_text_list = []
+                    for item in text_list:
+                        if isinstance(item, list):
+                            flat_text_list.extend(item)
+                        else:
+                            flat_text_list.append(item)
+                    combined_text = " ".join(flat_text_list)
+                else:
+                    # text_list 是 ['prompt1', 'prompt2', ...] 格式，直接拼接
+                    combined_text = " ".join(text_list)
                 combined_texts.append(combined_text)
             
             # 准备文本输入

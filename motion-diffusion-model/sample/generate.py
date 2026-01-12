@@ -40,11 +40,26 @@ def main(args=None):
         out_path = os.path.join(os.path.dirname(args.model_path),
                                 'samples_{}_{}_seed{}'.format(name, niter, args.seed))
         if args.text_prompt != '':
-            out_path += '_' + args.text_prompt.replace(' ', '_').replace('.', '')
+            # 截断文本提示以避免路径名过长（文件系统限制通常是255字符）
+            # 保留前50个字符并清理特殊字符
+            text_suffix = args.text_prompt.replace(' ', '_').replace('.', '').replace(',', '').replace(':', '').replace(';', '').replace('/', '_').replace('\\', '_')
+            # 限制长度为50字符，避免路径名过长
+            max_text_len = 50
+            if len(text_suffix) > max_text_len:
+                text_suffix = text_suffix[:max_text_len]
+            out_path += '_' + text_suffix
         elif args.input_text != '':
-            out_path += '_' + os.path.basename(args.input_text).replace('.txt', '').replace(' ', '_').replace('.', '')
+            input_basename = os.path.basename(args.input_text).replace('.txt', '').replace(' ', '_').replace('.', '')
+            # 同样限制长度
+            if len(input_basename) > 50:
+                input_basename = input_basename[:50]
+            out_path += '_' + input_basename
         elif args.dynamic_text_path != '':
-            out_path += '_' + os.path.basename(args.dynamic_text_path).replace('.txt', '').replace(' ', '_').replace('.', '')
+            dynamic_basename = os.path.basename(args.dynamic_text_path).replace('.txt', '').replace(' ', '_').replace('.', '')
+            # 同样限制长度
+            if len(dynamic_basename) > 50:
+                dynamic_basename = dynamic_basename[:50]
+            out_path += '_' + dynamic_basename
 
     # this block must be called BEFORE the dataset is loaded
     texts = None

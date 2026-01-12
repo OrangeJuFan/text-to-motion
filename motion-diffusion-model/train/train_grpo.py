@@ -372,6 +372,8 @@ def main():
             noise_scale=noise_scale,
             train_timesteps=train_timesteps,
             inference_timesteps=inference_timesteps,
+            num_epochs=getattr(args, 'num_epochs', 1),
+            kl_threshold=getattr(args, 'kl_threshold', 0.01),
             device=device,
         )
     else:
@@ -385,6 +387,8 @@ def main():
             group_size=args.group_size,
             clip_epsilon=args.clip_epsilon,
             kl_penalty=args.kl_penalty,
+            num_epochs=getattr(args, 'num_epochs', 1),
+            kl_threshold=getattr(args, 'kl_threshold', 0.01),
             device=device,
         )
     

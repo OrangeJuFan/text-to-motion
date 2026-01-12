@@ -43,6 +43,8 @@ class GRPOTrainer:
         advantage_eps: float = 1e-8,
         device: str = 'cuda',
         use_checkpointing: bool = False,
+        num_epochs: int = 1,
+        kl_threshold: float = 0.01,
     ):
         """
         初始化 GRPO 训练器。
@@ -59,6 +61,8 @@ class GRPOTrainer:
             advantage_eps: 优势归一化的数值稳定性小量
             device: 运行设备
             use_checkpointing: 是否使用梯度检查点以节省显存
+            num_epochs: 每个 batch 的更新轮数（Multi-Epoch PPO，默认 1 表示单轮更新）
+            kl_threshold: KL 散度阈值，超过则提前终止更新（默认 0.01）
         """
         self.model = model
         self.ref_model = ref_model
@@ -71,6 +75,8 @@ class GRPOTrainer:
         self.advantage_eps = advantage_eps
         self.device = device
         self.use_checkpointing = use_checkpointing
+        self.num_epochs = num_epochs
+        self.kl_threshold = kl_threshold
         
         # 确保参考模型被冻结
         for param in self.ref_model.parameters():
@@ -382,6 +388,7 @@ class GRPOTrainer:
         log_prob_current: torch.Tensor,
         log_prob_ref: torch.Tensor,
         advantages: torch.Tensor,
+        old_log_prob: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         计算 GRPO 损失。
@@ -392,13 +399,21 @@ class GRPOTrainer:
             log_prob_current: 当前模型下的 log probs [B*G]
             log_prob_ref: 参考模型下的 log probs [B*G]
             advantages: 组相对优势 [B*G]
+            old_log_prob: 初始采样时的 log prob（用于多轮更新），如果为 None，则使用 log_prob_ref
             
         返回:
             loss: 标量损失值
             stats: 用于记录的统计信息字典
         """
-        # 计算 ratio（数值稳定性：限制差值范围）
-        log_ratio = log_prob_current - log_prob_ref  # [B*G]
+        # 计算 ratio
+        # 如果提供了 old_log_prob（多轮更新），则使用 old_log_prob 计算 ratio
+        # 否则使用 log_prob_ref（单轮更新或第一轮）
+        if old_log_prob is not None:
+            # 多轮更新：ratio = exp(new_log_prob - old_log_prob)
+            log_ratio = log_prob_current - old_log_prob  # [B*G]
+        else:
+            # 单轮更新：ratio = exp(log_prob_current - log_prob_ref)
+            log_ratio = log_prob_current - log_prob_ref  # [B*G]
         
         # 检查 log_ratio 是否异常大
         # 对于高维数据，log_prob 的绝对值可能很大，但它们的差值应该相对较小
@@ -632,9 +647,13 @@ class GRPOTrainer:
                 print(f"  注意: 对于高维数据，log prob 绝对值大是正常的，将被限制在 [-1e7, 1e7]")
                 log_prob_ref = torch.clamp(log_prob_ref, min=-1e7, max=1e7)
         
-        # 清理轨迹以释放内存（如果不再需要）
-        # 注意：轨迹只在计算 log prob 时需要，之后可以删除
-        if self.clear_trajectory_after_logprob:
+        # 保存 old_log_prob（用于多轮更新）
+        # 在多轮更新中，old_log_prob 是固定不变的（初始采样时的 log prob）
+        old_log_prob = log_prob_current.detach().clone()  # 固定值，不随模型更新而改变
+        
+        # 如果是多轮更新，需要保留轨迹用于后续轮次
+        # 如果是单轮更新（num_epochs == 1），可以清理轨迹以节省内存
+        if self.num_epochs == 1 and self.clear_trajectory_after_logprob:
             del latents_sequence_current, timesteps_sequence
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -695,118 +714,262 @@ class GRPOTrainer:
             advantages = torch.nan_to_num(advantages, nan=0.0, posinf=1e6, neginf=-1e6)
         
         # ========== 阶段 4: 损失计算和更新 ==========
-        loss, stats = self.compute_grpo_loss(
-            log_prob_current,
-            log_prob_ref,
-            advantages,
-        )
-        
-        # 添加奖励统计信息
-        stats['mean_reward'] = rewards.mean().item()
-        stats['std_reward'] = rewards.std().item()
-        
-        # 计算每个 prompt 的平均得分（用于绘制曲线）
-        # rewards 形状: [B*G]，需要 reshape 为 [B, G] 然后计算每个 prompt 的平均值
-        batch_size = rewards.shape[0] // self.group_size
-        rewards_reshaped = rewards.view(batch_size, self.group_size)  # [B, G]
-        prompt_avg_rewards = rewards_reshaped.mean(dim=1)  # [B] - 每个 prompt 的平均得分
-        stats['prompt_avg_reward'] = prompt_avg_rewards.mean().item()  # 所有 prompt 的平均
-        
-        # 提取 R_pos 和 R_neg 用于绘制曲线
-        if self._last_reward_components is not None:
-            R_pos = self._last_reward_components.get('R_pos')
-            R_neg = self._last_reward_components.get('R_neg')
-            if R_pos is not None:
-                # R_pos 和 R_neg 是 [B] 形状，需要扩展到 [B*G] 然后取平均
-                if R_pos.dim() == 1 and R_pos.shape[0] == batch_size:
-                    # 扩展到组大小
-                    R_pos_expanded = R_pos.unsqueeze(1).repeat(1, self.group_size).view(-1)
-                    R_neg_expanded = R_neg.unsqueeze(1).repeat(1, self.group_size).view(-1) if R_neg is not None else torch.zeros_like(R_pos_expanded)
-                    stats['R_pos'] = R_pos_expanded.mean().item()
-                    stats['R_neg'] = R_neg_expanded.mean().item()
+        # 如果是单轮更新（num_epochs == 1），使用原来的逻辑
+        # 如果是多轮更新（num_epochs > 1），循环 K 次更新
+        if self.num_epochs == 1:
+            # 单轮更新（向后兼容）
+            loss, stats = self.compute_grpo_loss(
+                log_prob_current,
+                log_prob_ref,
+                advantages,
+                old_log_prob=None,  # 单轮更新不使用 old_log_prob
+            )
+            
+            # 添加奖励统计信息
+            stats['mean_reward'] = rewards.mean().item()
+            stats['std_reward'] = rewards.std().item()
+            
+            # 计算每个 prompt 的平均得分（用于绘制曲线）
+            batch_size = rewards.shape[0] // self.group_size
+            rewards_reshaped = rewards.view(batch_size, self.group_size)  # [B, G]
+            prompt_avg_rewards = rewards_reshaped.mean(dim=1)  # [B] - 每个 prompt 的平均得分
+            stats['prompt_avg_reward'] = prompt_avg_rewards.mean().item()  # 所有 prompt 的平均
+            
+            # 提取 R_pos 和 R_neg 用于绘制曲线
+            if self._last_reward_components is not None:
+                R_pos = self._last_reward_components.get('R_pos')
+                R_neg = self._last_reward_components.get('R_neg')
+                if R_pos is not None:
+                    # R_pos 和 R_neg 是 [B] 形状，需要扩展到 [B*G] 然后取平均
+                    if R_pos.dim() == 1 and R_pos.shape[0] == batch_size:
+                        # 扩展到组大小
+                        R_pos_expanded = R_pos.unsqueeze(1).repeat(1, self.group_size).view(-1)
+                        R_neg_expanded = R_neg.unsqueeze(1).repeat(1, self.group_size).view(-1) if R_neg is not None else torch.zeros_like(R_pos_expanded)
+                        stats['R_pos'] = R_pos_expanded.mean().item()
+                        stats['R_neg'] = R_neg_expanded.mean().item()
+                    else:
+                        stats['R_pos'] = R_pos.mean().item() if isinstance(R_pos, torch.Tensor) else R_pos
+                        stats['R_neg'] = R_neg.mean().item() if R_neg is not None and isinstance(R_neg, torch.Tensor) else (R_neg if R_neg is not None else 0.0)
                 else:
-                    stats['R_pos'] = R_pos.mean().item() if isinstance(R_pos, torch.Tensor) else R_pos
-                    stats['R_neg'] = R_neg.mean().item() if R_neg is not None and isinstance(R_neg, torch.Tensor) else (R_neg if R_neg is not None else 0.0)
+                    stats['R_pos'] = stats['mean_reward']  # 如果没有，使用 mean_reward 作为近似
+                    stats['R_neg'] = 0.0
             else:
                 stats['R_pos'] = stats['mean_reward']  # 如果没有，使用 mean_reward 作为近似
                 stats['R_neg'] = 0.0
-        else:
-            stats['R_pos'] = stats['mean_reward']  # 如果没有，使用 mean_reward 作为近似
-            stats['R_neg'] = 0.0
-        
-        # 检查损失是否异常
-        if torch.isnan(loss) or torch.isinf(loss):
-            print("错误: 损失包含 NaN 或 Inf，跳过此步")
-            print(f"  loss: {loss.item() if not torch.isnan(loss) else 'NaN'}")
-            print(f"  policy_loss: {stats.get('policy_loss', 'N/A')}")
-            print(f"  kl_penalty: {stats.get('kl_penalty', 'N/A')}")
-            print(f"  mean_ratio: {stats.get('mean_ratio', 'N/A')}")
-            print(f"  mean_advantage: {stats.get('mean_advantage', 'N/A')}")
-            # 返回统计信息但不更新模型
-            return stats
-        
-        # 反向传播
-        self.optimizer.zero_grad()
-        loss.backward()
-        
-        # 计算梯度范数（在裁剪之前）
-        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=float('inf'))
-        stats['grad_norm'] = grad_norm.item()
-        
-        # 检查梯度是否异常
-        if torch.isnan(grad_norm) or torch.isinf(grad_norm):
-            print(f"错误: 梯度包含 NaN 或 Inf，跳过此步")
-            print(f"  grad_norm: {grad_norm.item() if not torch.isnan(grad_norm) else 'NaN'}")
-            # 清零梯度，不更新模型
+            
+            # 检查损失是否异常
+            if torch.isnan(loss) or torch.isinf(loss):
+                print("错误: 损失包含 NaN 或 Inf，跳过此步")
+                print(f"  loss: {loss.item() if not torch.isnan(loss) else 'NaN'}")
+                print(f"  policy_loss: {stats.get('policy_loss', 'N/A')}")
+                print(f"  kl_penalty: {stats.get('kl_penalty', 'N/A')}")
+                print(f"  mean_ratio: {stats.get('mean_ratio', 'N/A')}")
+                print(f"  mean_advantage: {stats.get('mean_advantage', 'N/A')}")
+                # 返回统计信息但不更新模型
+                return stats
+            
+            # 反向传播和更新（单轮更新）
             self.optimizer.zero_grad()
-            return stats
-        
-        # 分析梯度来源（找出哪个参数导致梯度爆炸）
-        if grad_norm > 1000:
-            print(f"警告: 梯度范数异常大 ({grad_norm.item():.2f})，分析梯度来源...")
-            max_grad_per_param = 0
-            max_grad_param_name = None
-            for name, param in self.model.named_parameters():
-                if param.grad is not None:
-                    param_grad_norm = param.grad.norm().item()
-                    if param_grad_norm > max_grad_per_param:
-                        max_grad_per_param = param_grad_norm
-                        max_grad_param_name = name
-            if max_grad_param_name:
-                print(f"  最大梯度来自参数: {max_grad_param_name}")
-                print(f"  该参数的梯度范数: {max_grad_per_param:.2f}")
-        
-        # 梯度裁剪：使用更严格的值
-        # 如果梯度太大，先裁剪，然后检查是否仍然异常
-        max_grad_norm = 1.0  # 非常严格的值，因为学习率已经很小
-        if grad_norm > max_grad_norm:
-            print(f"警告: 梯度范数过大 ({grad_norm.item():.2f})，将被裁剪到 {max_grad_norm}")
-            print(f"  损失值: {loss.item():.4f}")
-            print(f"  policy_loss: {stats.get('policy_loss', 'N/A')}")
-            print(f"  kl_penalty: {stats.get('kl_penalty', 'N/A')}")
-            print(f"  mean_ratio: {stats.get('mean_ratio', 'N/A')}")
-            print(f"  mean_advantage: {stats.get('mean_advantage', 'N/A')}")
+            loss.backward()
             
-            # 裁剪梯度
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=max_grad_norm)
+            # 计算梯度范数（在裁剪之前）
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=float('inf'))
+            stats['grad_norm'] = grad_norm.item()
             
-            # 重新计算梯度范数
-            grad_norm_after = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=float('inf'))
-            stats['grad_norm'] = grad_norm_after.item()
-            
-            # 如果裁剪后仍然很大，跳过更新
-            if grad_norm_after > max_grad_norm * 10:
-                print(f"错误: 梯度裁剪后仍然过大 ({grad_norm_after.item():.2f})，跳过此步")
-                print(f"  建议: 进一步降低学习率（当前: 5e-7），或增加 KL 惩罚，或检查损失计算")
+            # 检查梯度是否异常
+            if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                print(f"错误: 梯度包含 NaN 或 Inf，跳过此步")
+                print(f"  grad_norm: {grad_norm.item() if not torch.isnan(grad_norm) else 'NaN'}")
+                # 清零梯度，不更新模型
                 self.optimizer.zero_grad()
                 return stats
+            
+            # 分析梯度来源（找出哪个参数导致梯度爆炸）
+            if grad_norm > 1000:
+                print(f"警告: 梯度范数异常大 ({grad_norm.item():.2f})，分析梯度来源...")
+                max_grad_per_param = 0
+                max_grad_param_name = None
+                for name, param in self.model.named_parameters():
+                    if param.grad is not None:
+                        param_grad_norm = param.grad.norm().item()
+                        if param_grad_norm > max_grad_per_param:
+                            max_grad_per_param = param_grad_norm
+                            max_grad_param_name = name
+                if max_grad_param_name:
+                    print(f"  最大梯度来自参数: {max_grad_param_name}")
+                    print(f"  该参数的梯度范数: {max_grad_per_param:.2f}")
+            
+            # 梯度裁剪：使用更严格的值
+            max_grad_norm = 1.0  # 非常严格的值，因为学习率已经很小
+            if grad_norm > max_grad_norm:
+                print(f"警告: 梯度范数过大 ({grad_norm.item():.2f})，将被裁剪到 {max_grad_norm}")
+                print(f"  损失值: {loss.item():.4f}")
+                print(f"  policy_loss: {stats.get('policy_loss', 'N/A')}")
+                print(f"  kl_penalty: {stats.get('kl_penalty', 'N/A')}")
+                print(f"  mean_ratio: {stats.get('mean_ratio', 'N/A')}")
+                print(f"  mean_advantage: {stats.get('mean_advantage', 'N/A')}")
+                
+                # 裁剪梯度
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=max_grad_norm)
+                
+                # 重新计算梯度范数
+                grad_norm_after = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=float('inf'))
+                stats['grad_norm'] = grad_norm_after.item()
+                
+                # 如果裁剪后仍然很大，跳过更新
+                if grad_norm_after > max_grad_norm * 10:
+                    print(f"错误: 梯度裁剪后仍然过大 ({grad_norm_after.item():.2f})，跳过此步")
+                    print(f"  建议: 进一步降低学习率（当前: 5e-7），或增加 KL 惩罚，或检查损失计算")
+                    self.optimizer.zero_grad()
+                    return stats
+            else:
+                # 正常情况下的梯度裁剪
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=max_grad_norm)
+            
+            self.optimizer.step()
+            
+            return stats
+        
         else:
-            # 正常情况下的梯度裁剪
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=max_grad_norm)
-        
-        self.optimizer.step()
-        
-        return stats
+            # ========== 多轮更新（Multi-Epoch PPO）==========
+            # 多轮更新：循环 K 次，每次重新计算 new_log_prob，检查 KL 散度
+            batch_size = rewards.shape[0] // self.group_size
+            total_loss = 0.0
+            total_kl = 0.0
+            actual_epochs = 0
+            
+            # 保存奖励统计信息（只计算一次）
+            stats = {
+                'mean_reward': rewards.mean().item(),
+                'std_reward': rewards.std().item(),
+            }
+            
+            # 计算每个 prompt 的平均得分（用于绘制曲线）
+            rewards_reshaped = rewards.view(batch_size, self.group_size)  # [B, G]
+            prompt_avg_rewards = rewards_reshaped.mean(dim=1)  # [B] - 每个 prompt 的平均得分
+            stats['prompt_avg_reward'] = prompt_avg_rewards.mean().item()  # 所有 prompt 的平均
+            
+            # 提取 R_pos 和 R_neg 用于绘制曲线
+            if self._last_reward_components is not None:
+                R_pos = self._last_reward_components.get('R_pos')
+                R_neg = self._last_reward_components.get('R_neg')
+                if R_pos is not None:
+                    # R_pos 和 R_neg 是 [B] 形状，需要扩展到 [B*G] 然后取平均
+                    if R_pos.dim() == 1 and R_pos.shape[0] == batch_size:
+                        # 扩展到组大小
+                        R_pos_expanded = R_pos.unsqueeze(1).repeat(1, self.group_size).view(-1)
+                        R_neg_expanded = R_neg.unsqueeze(1).repeat(1, self.group_size).view(-1) if R_neg is not None else torch.zeros_like(R_pos_expanded)
+                        stats['R_pos'] = R_pos_expanded.mean().item()
+                        stats['R_neg'] = R_neg_expanded.mean().item()
+                    else:
+                        stats['R_pos'] = R_pos.mean().item() if isinstance(R_pos, torch.Tensor) else R_pos
+                        stats['R_neg'] = R_neg.mean().item() if R_neg is not None and isinstance(R_neg, torch.Tensor) else (R_neg if R_neg is not None else 0.0)
+                else:
+                    stats['R_pos'] = stats['mean_reward']  # 如果没有，使用 mean_reward 作为近似
+                    stats['R_neg'] = 0.0
+            else:
+                stats['R_pos'] = stats['mean_reward']  # 如果没有，使用 mean_reward 作为近似
+                stats['R_neg'] = 0.0
+            
+            # 循环 K 次更新
+            for epoch in range(self.num_epochs):
+                # 重新计算 new_log_prob（使用更新后的模型，但使用相同的轨迹）
+                new_log_prob = self.get_batch_log_prob(
+                    self.model,
+                    latents_sequence_current,  # 使用相同的轨迹（不重新采样）
+                    timesteps_sequence,
+                    model_kwargs,
+                )  # [B*G]
+                
+                # 检查 new_log_prob 是否异常
+                if torch.isnan(new_log_prob).any():
+                    print(f"警告: new_log_prob 包含 NaN (epoch {epoch+1}/{self.num_epochs})")
+                    new_log_prob = torch.nan_to_num(new_log_prob, nan=0.0, posinf=1e6, neginf=-1e6)
+                
+                # 限制 new_log_prob 范围
+                if (new_log_prob.abs() > 1e7).any():
+                    new_log_prob = torch.clamp(new_log_prob, min=-1e7, max=1e7)
+                
+                # 计算 KL 散度（相对于参考模型）
+                kl = self.compute_kl_penalty(new_log_prob, log_prob_ref)
+                
+                # 检查 KL 散度是否超过阈值，提前终止
+                kl_mean = kl.mean().item()
+                if kl_mean > self.kl_threshold:
+                    print(f"警告: KL 散度超过阈值 ({kl_mean:.4f} > {self.kl_threshold})，提前终止更新 (epoch {epoch+1}/{self.num_epochs})")
+                    break
+                
+                # 计算损失（使用 old_log_prob 计算 ratio）
+                loss, epoch_stats = self.compute_grpo_loss(
+                    new_log_prob,  # 当前模型的 log prob
+                    log_prob_ref,  # 参考模型的 log prob（用于 KL 散度计算）
+                    advantages,    # 优势（固定不变）
+                    old_log_prob=old_log_prob,  # 初始采样时的 log prob（用于 ratio 计算）
+                )
+                
+                # 检查损失是否异常
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"警告: 损失包含 NaN 或 Inf (epoch {epoch+1}/{self.num_epochs})，跳过此轮")
+                    continue
+                
+                # 反向传播和更新
+                self.optimizer.zero_grad()
+                loss.backward()
+                
+                # 梯度裁剪
+                max_grad_norm = 1.0
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=max_grad_norm)
+                
+                # 检查梯度是否异常
+                if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                    print(f"警告: 梯度包含 NaN 或 Inf (epoch {epoch+1}/{self.num_epochs})，跳过此轮")
+                    self.optimizer.zero_grad()
+                    continue
+                
+                # 如果梯度太大，跳过此轮
+                if grad_norm > max_grad_norm * 10:
+                    print(f"警告: 梯度范数过大 ({grad_norm.item():.2f}) (epoch {epoch+1}/{self.num_epochs})，跳过此轮")
+                    self.optimizer.zero_grad()
+                    continue
+                
+                # 更新模型参数
+                self.optimizer.step()
+                
+                # 累计统计信息
+                total_loss += loss.item()
+                total_kl += kl_mean
+                actual_epochs += 1
+            
+            # 计算平均统计信息
+            if actual_epochs > 0:
+                stats['loss'] = total_loss / actual_epochs
+                stats['kl_penalty'] = total_kl / actual_epochs
+                stats['policy_loss'] = epoch_stats.get('policy_loss', 0.0)
+                stats['mean_ratio'] = epoch_stats.get('mean_ratio', 1.0)
+                stats['mean_advantage'] = epoch_stats.get('mean_advantage', 0.0)
+                stats['mean_log_prob_current'] = epoch_stats.get('mean_log_prob_current', 0.0)
+                stats['mean_log_prob_ref'] = epoch_stats.get('mean_log_prob_ref', 0.0)
+                stats['grad_norm'] = grad_norm.item() if 'grad_norm' in locals() else 0.0
+                stats['actual_epochs'] = actual_epochs  # 实际执行的轮数
+            else:
+                # 如果没有执行任何更新，返回默认统计信息
+                stats['loss'] = 0.0
+                stats['kl_penalty'] = 0.0
+                stats['policy_loss'] = 0.0
+                stats['mean_ratio'] = 1.0
+                stats['mean_advantage'] = 0.0
+                stats['mean_log_prob_current'] = 0.0
+                stats['mean_log_prob_ref'] = 0.0
+                stats['grad_norm'] = 0.0
+                stats['actual_epochs'] = 0
+            
+            # 清理轨迹（多轮更新完成后）
+            if self.clear_trajectory_after_logprob:
+                del latents_sequence_current, timesteps_sequence
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            
+            return stats
     
     def _prepare_model_kwargs(
         self,
